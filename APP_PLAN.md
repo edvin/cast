@@ -1135,6 +1135,9 @@ struct PlayerView: UIViewControllerRepresentable {
                 player.play()
             }
 
+            // Auto-select English subtitles if available
+            selectEnglishSubtitles(player: player)
+
             // Start progress reporting
             let reporter = ProgressReporter()
             reporter.start(client: parent.client, episodeId: parent.episode.id) { [weak player] in
@@ -1153,6 +1156,29 @@ struct PlayerView: UIViewControllerRepresentable {
                 name: .AVPlayerItemDidPlayToEndTime,
                 object: player.currentItem
             )
+        }
+
+        /// Auto-select English subtitle track if one exists in the media file.
+        /// Embedded subtitles (tx3g in MP4, SRT/ASS in MKV) are exposed by AVPlayer
+        /// as AVMediaSelectionOptions in the .legible group.
+        /// Users can always change subtitles via the standard tvOS player menu.
+        private func selectEnglishSubtitles(player: AVPlayer) {
+            guard let item = player.currentItem else { return }
+            // Need to wait for the asset to be ready
+            Task {
+                let asset = item.asset
+                if let group = try? await asset.loadMediaSelectionGroup(for: .legible) {
+                    let english = AVMediaSelectionGroup.mediaSelectionOptions(
+                        from: group.options,
+                        with: Locale(identifier: "en")
+                    ).first
+                    if let track = english {
+                        await MainActor.run {
+                            item.select(track, in: group)
+                        }
+                    }
+                }
+            }
         }
 
         @objc private func playerDidFinish(_ notification: Notification) {
@@ -1206,6 +1232,7 @@ This ensures the seek + play + progress reporter all start immediately.
 3. **Dismiss on finish:** When `AVPlayerItemDidPlayToEndTime` fires, send final progress and dismiss. The server will mark the episode as completed (>= 90% = completed).
 4. **Dismiss on user action:** When the user presses Menu/Back on the Siri Remote, `AVPlayerViewController` triggers dismissal. The delegate method `playerViewControllerDidEndDismissalTransition` fires — send final progress there.
 5. **Transport controls:** `AVPlayerViewController` on tvOS automatically provides: play/pause (click), scrub (swipe left/right), 10-second skip (click edges), info panel, subtitle selection — all for free.
+6. **Subtitles:** Embedded subtitle tracks (tx3g in MP4, SRT/ASS in MKV) are automatically available. The player auto-selects English subtitles on load. Users can change the subtitle/audio track via the standard tvOS player info panel (swipe down on Siri Remote during playback). No server-side subtitle API is needed — AVPlayer handles this from the stream.
 
 **Presenting the player:**
 The player is shown via `.fullScreenCover()` from `SeriesDetailView`. This gives a full-screen modal presentation, which is the standard for video playback on tvOS. When dismissed (by user or by end-of-playback), control returns to `SeriesDetailView` which re-fetches data to show updated progress.

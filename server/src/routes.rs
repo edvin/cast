@@ -96,6 +96,18 @@ struct ProgressUpdate {
 
 // --- Helpers ---
 
+/// Validate that a resolved path is within the media root directory.
+/// Prevents path traversal attacks even if library data is somehow corrupted.
+fn safe_media_path(media_root: &std::path::Path, relative: &str) -> Result<std::path::PathBuf, StatusCode> {
+    let resolved = media_root.join(relative);
+    let canonical = resolved.canonicalize().map_err(|_| StatusCode::NOT_FOUND)?;
+    if !canonical.starts_with(media_root) {
+        tracing::warn!("Path traversal attempt blocked: {relative:?}");
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(canonical)
+}
+
 fn build_episode_item(ep: &crate::library::Episode, series_id: &str, state: &AppState) -> EpisodeItem {
     let progress = state.db.get_progress(&ep.id).map(|p| EpisodeProgress {
         position_secs: p.position_secs,
@@ -281,11 +293,7 @@ async fn get_series_art(
     let lib = state.library.read().await;
     let series = lib.find_series(&series_id).ok_or(StatusCode::NOT_FOUND)?;
     let art_rel = series.art.as_ref().ok_or(StatusCode::NOT_FOUND)?;
-    let art_path = state.media_path.join(art_rel);
-
-    if !art_path.exists() {
-        return Err(StatusCode::NOT_FOUND);
-    }
+    let art_path = safe_media_path(&state.media_path, art_rel)?;
 
     let content_type = mime_guess::from_path(&art_path).first_or_octet_stream().to_string();
 
@@ -304,8 +312,11 @@ async fn stream_episode(
 ) -> Result<Response, StatusCode> {
     let lib = state.library.read().await;
     let (_series, episode) = lib.find_episode(&episode_id).ok_or(StatusCode::NOT_FOUND)?;
-    let file_path = state.media_path.join(&episode.path);
-    let file_size = episode.size_bytes;
+    let file_path = safe_media_path(&state.media_path, &episode.path)?;
+    let file_size = file_path
+        .metadata()
+        .map(|m| m.len())
+        .map_err(|_| StatusCode::NOT_FOUND)?;
 
     let content_type = mime_guess::from_path(&file_path).first_or_octet_stream().to_string();
 
@@ -418,11 +429,7 @@ async fn get_series_backdrop(
     let lib = state.library.read().await;
     let series = lib.find_series(&series_id).ok_or(StatusCode::NOT_FOUND)?;
     let backdrop_rel = series.backdrop.as_ref().ok_or(StatusCode::NOT_FOUND)?;
-    let backdrop_path = state.media_path.join(backdrop_rel);
-
-    if !backdrop_path.exists() {
-        return Err(StatusCode::NOT_FOUND);
-    }
+    let backdrop_path = safe_media_path(&state.media_path, backdrop_rel)?;
 
     let content_type = mime_guess::from_path(&backdrop_path)
         .first_or_octet_stream()
@@ -447,7 +454,7 @@ async fn get_episode_thumbnail(
     if !thumb_path.exists() {
         let lib = state.library.read().await;
         let (_series, episode) = lib.find_episode(&episode_id).ok_or(StatusCode::NOT_FOUND)?;
-        let video_path = state.media_path.join(&episode.path);
+        let video_path = safe_media_path(&state.media_path, &episode.path)?;
 
         // Create thumbnail directory
         tokio::fs::create_dir_all(&thumb_dir)

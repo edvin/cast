@@ -53,7 +53,7 @@ async fn main() {
     match dotenvy::dotenv() {
         Ok(path) => eprintln!("Loaded .env from {}", path.display()),
         Err(e) => {
-            eprintln!(".env not found in cwd ({}), trying exe dir...", e);
+            eprintln!(".env not found in cwd ({e}), trying exe dir...");
             if let Ok(exe) = std::env::current_exe() {
                 if let Some(dir) = exe.parent() {
                     let env_path = dir.join(".env");

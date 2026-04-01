@@ -184,7 +184,7 @@ pub fn parse_episode_filename(filename: &str) -> ParsedEpisodeInfo {
     if let Some(caps) = RE_COMPACT_SSEE.captures(stem) {
         let season: u32 = caps[1].parse().unwrap();
         let episode: u32 = caps[2].parse().unwrap();
-        if season >= 1 && season <= 30 && episode >= 1 {
+        if (1..=30).contains(&season) && episode >= 1 {
             return ParsedEpisodeInfo {
                 season: Some(season),
                 episode: Some(episode),

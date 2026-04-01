@@ -125,7 +125,7 @@ curl -X POST http://localhost:3456/api/metadata/fetch
 
 ## Dependencies
 
-- **ffmpeg** (recommended) — **required** for MKV/AVI/WebM files. The server automatically converts these to MP4 in the background and deletes the originals. Without ffmpeg, only native MP4/MOV files will play. Also enables episode thumbnail generation.
+- **ffmpeg** (recommended) — **required** for MKV/AVI/WebM files. The server automatically converts these to MP4 in the background and deletes the originals. Without ffmpeg, only native MP4/MOV files will play.
 - **ffprobe** — enables video duration detection (bundled with ffmpeg)
 
 Install via your package manager:

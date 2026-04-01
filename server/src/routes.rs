@@ -101,7 +101,12 @@ struct ProgressUpdate {
 fn safe_media_path(media_root: &std::path::Path, relative: &str) -> Result<std::path::PathBuf, StatusCode> {
     let resolved = media_root.join(relative);
     let canonical = resolved.canonicalize().map_err(|_| StatusCode::NOT_FOUND)?;
-    if !canonical.starts_with(media_root) {
+    // Canonicalize media_root too so both sides use the same format
+    // (important on Windows where canonicalize produces \\?\ prefixed paths)
+    let canonical_root = media_root
+        .canonicalize()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !canonical.starts_with(&canonical_root) {
         tracing::warn!("Path traversal attempt blocked: {relative:?}");
         return Err(StatusCode::FORBIDDEN);
     }
@@ -122,7 +127,7 @@ fn build_episode_item(ep: &crate::library::Episode, series_id: &str, state: &App
         .and_then(|(s, e)| state.db.get_episode_metadata_by_number(series_id, s, e));
 
     // Check for thumbnail file
-    let thumb_path = state.media_path.join(format!(".thumbnails/{}.jpg", ep.id));
+    let thumb_path = state.media_path.join(".thumbnails").join(format!("{}.jpg", ep.id));
     let has_thumbnail = thumb_path.exists();
 
     EpisodeItem {

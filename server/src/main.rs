@@ -9,6 +9,8 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Parser)]
 #[command(name = "cast-server", about = "Cast — local network video server")]
@@ -28,6 +30,10 @@ struct Args {
     /// TMDB API key for fetching series metadata and artwork
     #[arg(long, env = "TMDB_API_KEY")]
     tmdb_key: Option<String>,
+
+    /// Log to file in the media directory instead of stdout
+    #[arg(long)]
+    log_file: bool,
 }
 
 pub struct AppState {
@@ -39,9 +45,23 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
-
     let args = Args::parse();
+
+    // Set up logging — file or stdout
+    let _guard = if args.log_file {
+        let log_dir = args.media.join("logs");
+        std::fs::create_dir_all(&log_dir).ok();
+        let file_appender = tracing_appender::rolling::daily(&log_dir, "cast-server.log");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
+            .with(tracing_subscriber::EnvFilter::new("info"))
+            .init();
+        Some(guard)
+    } else {
+        tracing_subscriber::fmt::init();
+        None
+    };
 
     let media_path = args.media.canonicalize().unwrap_or_else(|_| {
         eprintln!("Media directory does not exist: {:?}", args.media);

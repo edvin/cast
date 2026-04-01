@@ -106,9 +106,16 @@ Add to the app's Info.plist (or via Xcode target settings):
 </array>
 <key>NSLocalNetworkUsageDescription</key>
 <string>Cast needs local network access to find and stream from your media server.</string>
+<key>NSAppTransportSecurity</key>
+<dict>
+    <key>NSAllowsLocalNetworking</key>
+    <true/>
+</dict>
 ```
 
-These keys are **required** on tvOS for NWBrowser/Bonjour to function. Without them, discovery will silently fail.
+These keys are **required** on tvOS:
+- `NSBonjourServices` + `NSLocalNetworkUsageDescription` — without them, Bonjour discovery silently fails
+- `NSAllowsLocalNetworking` — allows plain HTTP to local network addresses (the Cast server runs HTTP, not HTTPS). Without this, ATS blocks all API calls and streaming.
 
 ---
 
@@ -1841,7 +1848,7 @@ These are needed because:
 ## 14. Complete Build Checklist
 
 1. **Create Xcode project**: tvOS App, SwiftUI lifecycle, deployment target tvOS 17.0, bundle ID `com.edvin.cast`, saved in repo root (project at `Cast/`).
-2. **Add Info.plist entries**: `NSBonjourServices` with `_cast-media._tcp.`, `NSLocalNetworkUsageDescription`.
+2. **Add Info.plist entries**: `NSBonjourServices` with `_cast-media._tcp.`, `NSLocalNetworkUsageDescription`, and `NSAppTransportSecurity` with `NSAllowsLocalNetworking = true`.
 3. **Create `Models/Series.swift`**: All DTOs from Section 3 with Codable + Identifiable + Hashable.
 4. **Create `Models/ServerConnection.swift`**: Observable server URL state from Section 4.
 5. **Create `Services/APIClient.swift`**: HTTP client from Section 5.

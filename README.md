@@ -138,10 +138,18 @@ Install via your package manager:
 
 ## Windows Deployment
 
-For running as a background service on Windows:
-
+1. Download `cast-server-windows-amd64.exe` from [Releases](../../releases)
+2. Place it in a folder (e.g. `C:\Cast\`)
+3. Copy `scripts\install-windows.ps1` and `scripts\uninstall-windows.ps1` into the same folder
+4. Create a `.env` file next to the binary:
+```
+CAST_MEDIA_PATH=D:\Media
+TMDB_API_KEY=your-key
+CAST_SERVER_NAME=Living Room
+```
+5. Run from PowerShell:
 ```powershell
-.\scripts\install-windows.ps1 -MediaPath "D:\Media" -TmdbKey "your-key"
+.\install-windows.ps1
 ```
 
 This creates a Task Scheduler entry that auto-starts at login with file logging. Logs go to `<media-dir>\logs\`.
@@ -150,7 +158,7 @@ This creates a Task Scheduler entry that auto-starts at login with file logging.
 # Management
 Stop-ScheduledTask -TaskName CastServer
 Start-ScheduledTask -TaskName CastServer
-.\scripts\uninstall-windows.ps1
+.\uninstall-windows.ps1
 ```
 
 ## API

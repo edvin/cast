@@ -71,3 +71,5 @@ jobs:
             artifacts/cast-server-windows-amd64.exe/cast-server-windows-amd64.exe
             artifacts/cast-server-macos-arm64/cast-server-macos-arm64
             artifacts/cast-server-linux-amd64/cast-server-linux-amd64
+            scripts/install-windows.ps1
+            scripts/uninstall-windows.ps1

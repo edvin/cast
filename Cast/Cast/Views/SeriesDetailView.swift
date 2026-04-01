@@ -88,7 +88,7 @@ struct SeriesDetailView: View {
                     } placeholder: {
                         Rectangle().fill(Color(white: 0.08))
                     }
-                    .frame(width: geo.size.width, height: 620)
+                    .frame(width: geo.size.width, height: 620, alignment: .top)
                     .clipped()
                 } else if detail.hasArt, let client {
                     // Fallback: blurred poster as backdrop

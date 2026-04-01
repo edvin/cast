@@ -7,10 +7,27 @@ struct SeriesGridView: View {
     @State private var isLoading = true
     @State private var error: CastError?
     @State private var isRefreshing = false
+    @State private var focusedSeriesId: String?
 
     private var client: APIClient? {
         guard let url = connection.baseURL else { return nil }
         return APIClient(baseURL: url)
+    }
+
+    /// The backdrop URL for the currently focused series (or first available)
+    private var backgroundURL: URL? {
+        guard let client else { return nil }
+        // Use focused series backdrop if available
+        if let focusedId = focusedSeriesId,
+           let series = seriesList.first(where: { $0.id == focusedId }),
+           series.hasBackdrop {
+            return client.backdropURL(seriesId: focusedId)
+        }
+        // Fall back to first series with backdrop
+        if let first = seriesList.first(where: { $0.hasBackdrop }) {
+            return client.backdropURL(seriesId: first.id)
+        }
+        return nil
     }
 
     var body: some View {
@@ -36,19 +53,21 @@ struct SeriesGridView: View {
                 }
             } else {
                 ZStack {
-                    // Blurred backdrop background
-                    if let bgSeries = seriesList.first(where: { $0.hasBackdrop }), let client {
-                        AsyncImage(url: client.backdropURL(seriesId: bgSeries.id)) { image in
+                    // Focus-reactive blurred backdrop
+                    Color.black.ignoresSafeArea()
+
+                    if let url = backgroundURL {
+                        AsyncImage(url: url) { image in
                             image.resizable()
                                 .aspectRatio(contentMode: .fill)
-                                .blur(radius: 80)
-                                .overlay(Color.black.opacity(0.7))
+                                .blur(radius: 30)
+                                .overlay(Color.black.opacity(0.4))
                         } placeholder: {
-                            Color.black
+                            Color.clear
                         }
                         .ignoresSafeArea()
-                    } else {
-                        Color.black.ignoresSafeArea()
+                        .id(url) // force new view per URL for crossfade
+                        .transition(.opacity)
                     }
 
                     ScrollView {
@@ -87,6 +106,7 @@ struct SeriesGridView: View {
                         .padding(.bottom, 80)
                     }
                 }
+                .animation(.easeInOut(duration: 0.8), value: backgroundURL)
             }
         }
         .navigationTitle("")
@@ -129,7 +149,11 @@ struct SeriesGridView: View {
         ) {
             ForEach(seriesList) { series in
                 NavigationLink(value: series) {
-                    SeriesCard(series: series, artURL: client?.artURL(seriesId: series.id))
+                    SeriesCard(
+                        series: series,
+                        artURL: client?.artURL(seriesId: series.id),
+                        focusedSeriesId: $focusedSeriesId
+                    )
                 }
                 .buttonStyle(NoChromeFocusButtonStyle())
             }
@@ -162,9 +186,7 @@ struct SeriesGridView: View {
         do {
             try await client.fetchMetadata()
             await loadData()
-        } catch {
-            // Silently fail — metadata refresh is optional
-        }
+        } catch {}
         isRefreshing = false
     }
 }
@@ -211,14 +233,14 @@ private struct ContinueWatchingCard: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(item.seriesTitle)
-                    .font(.title3).bold().lineLimit(1).shadow(radius: 4)
+                    .font(.headline).lineLimit(1).shadow(radius: 4)
                 HStack(spacing: 8) {
                     Text(item.nextEpisode.episodeLabel)
-                        .font(.subheadline).foregroundStyle(Color(white: 0.7))
+                        .font(.caption).foregroundStyle(Color(white: 0.7))
                     if item.reason == "resume", let p = item.nextEpisode.progress {
                         Text("·").foregroundStyle(Color(white: 0.5))
                         Text("\(Int(p.fraction * 100))%")
-                            .font(.subheadline).foregroundStyle(Color(white: 0.7))
+                            .font(.caption).foregroundStyle(Color(white: 0.7))
                     }
                 }
                 if let progress = item.nextEpisode.progress, !progress.completed {
@@ -242,11 +264,12 @@ private struct ContinueWatchingCard: View {
     }
 }
 
-// MARK: - Series Card
+// MARK: - Series Card (reports focus to parent for reactive background)
 
 private struct SeriesCard: View {
     let series: SeriesListItem
     let artURL: URL?
+    @Binding var focusedSeriesId: String?
     @Environment(\.isFocused) private var isFocused
 
     var body: some View {
@@ -294,6 +317,11 @@ private struct SeriesCard: View {
         }
         .scaleEffect(isFocused ? 1.08 : 1.0)
         .animation(.easeInOut(duration: 0.2), value: isFocused)
+        .onChange(of: isFocused) { _, focused in
+            if focused {
+                focusedSeriesId = series.id
+            }
+        }
     }
 
     private var posterPlaceholder: some View {

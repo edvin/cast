@@ -520,6 +520,39 @@ fn needs_remux(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Check if the video stream needs transcoding (HEVC 10-bit, VP9, etc.)
+/// Returns ("copy", ...) for compatible codecs, ("libx264", ...) for incompatible ones.
+fn detect_video_codec(path: &std::path::Path) -> (&'static str, &'static str) {
+    let output = std::process::Command::new("ffprobe")
+        .arg("-v").arg("quiet")
+        .arg("-select_streams").arg("v:0")
+        .arg("-show_entries").arg("stream=codec_name,pix_fmt")
+        .arg("-of").arg("csv=p=0")
+        .arg(path)
+        .output();
+
+    if let Ok(output) = output {
+        let info = String::from_utf8_lossy(&output.stdout);
+        let info = info.trim();
+        // e.g. "hevc,yuv420p10le" or "h264,yuv420p"
+        let is_hevc = info.starts_with("hevc") || info.starts_with("h265");
+        let is_10bit = info.contains("10le") || info.contains("10be");
+        let is_vp9 = info.starts_with("vp9");
+        let is_av1 = info.starts_with("av1");
+
+        if is_vp9 || is_av1 || (is_hevc && is_10bit) {
+            tracing::info!("Video needs transcoding: {info}");
+            return ("libx264", "-crf 18 -preset fast");
+        }
+        if is_hevc {
+            // HEVC 8-bit — Apple TV 4K handles this, try copy first
+            tracing::info!("Video is HEVC 8-bit, using copy: {info}");
+            return ("copy", "");
+        }
+    }
+    ("copy", "")
+}
+
 /// Stream a video file with byte-range support for seeking.
 /// MKV files are remuxed on-the-fly to fragmented MP4 via ffmpeg.
 async fn stream_episode(
@@ -649,13 +682,23 @@ async fn stream_remuxed(
 
     // Not cached — stream directly from ffmpeg as fragmented MP4 (instant start)
     // and tee the output to a cache file for future plays
-    tracing::info!("Streaming+caching {:?}", file_path.file_name().unwrap());
+    let (video_codec, video_extra) = detect_video_codec(&file_path);
+    tracing::info!("Streaming+caching {:?} (video: {})", file_path.file_name().unwrap(), video_codec);
 
-    let mut child = std::process::Command::new("ffmpeg")
-        .arg("-hide_banner")
+    let mut cmd = std::process::Command::new("ffmpeg");
+    cmd.arg("-hide_banner")
         .arg("-loglevel").arg("warning")
         .arg("-i").arg(&file_path)
-        .arg("-c:v").arg("copy")
+        .arg("-c:v").arg(video_codec);
+
+    // Add quality/speed settings for transcoding
+    if video_codec != "copy" {
+        for part in video_extra.split_whitespace() {
+            cmd.arg(part);
+        }
+    }
+
+    let mut child = cmd
         .arg("-c:a").arg("aac")
         .arg("-b:a").arg("192k")
         .arg("-ac").arg("2")

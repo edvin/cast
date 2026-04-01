@@ -88,7 +88,7 @@ When you enter a series, the top of the screen should be cinematic:
    - **Lifecycle:** SwiftUI App
    - **Language:** Swift
    - **Include Tests:** No (not needed for v1)
-4. Save the project into the `app/` directory so the `.xcodeproj` lands at `app/Cast.xcodeproj`.
+4. Save the project into the repo root (`~/projects/cast/`) — Xcode creates `Cast/` alongside `server/`.
 5. In project settings, set **Minimum Deployments > tvOS** to **17.0**.
 6. In **Signing & Capabilities**, ensure the following:
    - **Incoming Connections (Server)** is NOT needed (we are a client).
@@ -114,10 +114,10 @@ These keys are **required** on tvOS for NWBrowser/Bonjour to function. Without t
 
 ## 2. File Structure
 
-Create the following files under `app/Cast/`:
+Create the following files under `Cast/Cast/`:
 
 ```
-app/Cast/
+Cast/Cast/
 ├── CastApp.swift                  — App entry point with NavigationStack
 ├── Models/
 │   ├── Series.swift               — All Codable DTOs matching server JSON
@@ -1840,7 +1840,7 @@ These are needed because:
 
 ## 14. Complete Build Checklist
 
-1. **Create Xcode project**: tvOS App, SwiftUI lifecycle, deployment target tvOS 17.0, bundle ID `com.edvin.cast`, save in `app/`.
+1. **Create Xcode project**: tvOS App, SwiftUI lifecycle, deployment target tvOS 17.0, bundle ID `com.edvin.cast`, saved in repo root (project at `Cast/`).
 2. **Add Info.plist entries**: `NSBonjourServices` with `_cast-media._tcp.`, `NSLocalNetworkUsageDescription`.
 3. **Create `Models/Series.swift`**: All DTOs from Section 3 with Codable + Identifiable + Hashable.
 4. **Create `Models/ServerConnection.swift`**: Observable server URL state from Section 4.

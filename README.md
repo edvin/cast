@@ -81,7 +81,7 @@ The server starts on port 3456 and advertises itself via Bonjour.
 
 ### 4. Install the tvOS app
 
-Open `app/Cast.xcodeproj` in Xcode, select your Apple TV as the run destination, and deploy. The app auto-discovers the server on the local network.
+Open `Cast/Cast.xcodeproj` in Xcode, select your Apple TV as the run destination, and deploy. The app auto-discovers the server on the local network.
 
 ## Server Configuration
 
@@ -197,7 +197,7 @@ cast/
 │   │   ├── media.rs     # ffprobe/ffmpeg integration
 │   │   └── mdns.rs      # Bonjour/mDNS advertisement
 │   └── Cargo.toml
-├── app/                 # tvOS SwiftUI app (Xcode project)
+├── Cast/                 # tvOS SwiftUI app (Xcode project)
 ├── scripts/             # Windows install/uninstall scripts
 ├── APP_PLAN.md          # Detailed tvOS app implementation plan
 ├── PLAN.md              # Architecture overview

@@ -44,7 +44,7 @@ cast/
 │       ├── db.rs         # SQLite watch progress (stored in cast.db)
 │       ├── routes.rs     # All HTTP endpoints
 │       └── mdns.rs       # Bonjour advertisement
-├── app/              # tvOS Xcode project (Swift/SwiftUI)
+├── Cast/              # tvOS Xcode project (Swift/SwiftUI)
 ├── PLAN.md
 └── CLAUDE.md
 ```
@@ -92,7 +92,7 @@ cargo run -- --media /path/to/media
 
 ---
 
-## tvOS App (`app/`) — TODO
+## tvOS App (`Cast/`) — TODO
 
 SwiftUI app targeting tvOS 17+.
 

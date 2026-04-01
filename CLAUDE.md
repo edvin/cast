@@ -4,7 +4,7 @@ Local network series streamer — Rust server + tvOS Apple TV app.
 
 ## Project Structure
 - `server/` — Rust (axum) HTTP media server
-- `app/` — tvOS SwiftUI app (Xcode project)
+- `Cast/` — tvOS SwiftUI app (Xcode project)
 - `scripts/` — Windows install/uninstall PowerShell scripts
 
 ## Media Model

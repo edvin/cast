@@ -5,8 +5,8 @@ server/target/
 .DS_Store
 
 # Xcode
-app/Cast.xcodeproj/xcuserdata/
-app/Cast.xcodeproj/project.xcworkspace/xcuserdata/
+Cast/Cast.xcodeproj/xcuserdata/
+Cast/Cast.xcodeproj/project.xcworkspace/xcuserdata/
 *.xcuserstate
 
 # Environment

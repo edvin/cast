@@ -37,7 +37,7 @@ media/
 - `03 - Title.mp4`
 - `03.mp4`
 
-**Video formats** — MP4/MOV files play natively. MKV, AVI, and WebM files are automatically remuxed to MP4 on first play (requires ffmpeg). The remuxed file is cached so subsequent plays are instant.
+**Video formats** — MP4/MOV files play natively. MKV, AVI, and WebM files are automatically remuxed to MP4 in the background when detected (requires ffmpeg). The original file is deleted once remuxing completes. HEVC 10-bit video is transcoded to H.264 for Apple TV compatibility. If a file hasn't been remuxed yet when you hit play, it streams on-the-fly.
 
 **Subtitles** — external `.srt` files are detected alongside video files:
 - `S01E01.srt` — matches `S01E01.mp4`, defaults to English
@@ -125,7 +125,7 @@ curl -X POST http://localhost:3456/api/metadata/fetch
 
 ## Dependencies
 
-- **ffmpeg** (recommended) — **required** for playing MKV/AVI/WebM files. The server remuxes these to MP4 on-the-fly so Apple TV can play them. Without ffmpeg, only native MP4/MOV files will play. Also enables episode thumbnail generation.
+- **ffmpeg** (recommended) — **required** for MKV/AVI/WebM files. The server automatically converts these to MP4 in the background and deletes the originals. Without ffmpeg, only native MP4/MOV files will play. Also enables episode thumbnail generation.
 - **ffprobe** — enables video duration detection (bundled with ffmpeg)
 
 Install via your package manager:

@@ -1,0 +1,92 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            server/target
+          key: check-${{ runner.os }}-cargo-${{ hashFiles('server/Cargo.lock') }}
+          restore-keys: |
+            check-${{ runner.os }}-cargo-
+
+      - name: Test
+        run: cargo test --manifest-path server/Cargo.toml
+
+      - name: Clippy
+        run: cargo clippy --manifest-path server/Cargo.toml -- -D warnings
+
+      - name: Format
+        run: cargo fmt --manifest-path server/Cargo.toml --all -- --check
+
+  build:
+    name: Build (${{ matrix.platform.name }})
+    needs: check
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: macOS (Apple Silicon)
+            os: macos-latest
+            target: aarch64-apple-darwin
+          - name: Windows
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            server/target
+          key: build-${{ matrix.platform.target }}-cargo-${{ hashFiles('server/Cargo.lock') }}
+          restore-keys: |
+            build-${{ matrix.platform.target }}-cargo-
+
+      - name: Build
+        run: cargo build --release --manifest-path server/Cargo.toml --target ${{ matrix.platform.target }}
+
+      - name: Upload binary (unix)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cast-server-${{ matrix.platform.target }}
+          path: server/target/${{ matrix.platform.target }}/release/cast-server
+
+      - name: Upload binary (windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cast-server-${{ matrix.platform.target }}
+          path: server/target/${{ matrix.platform.target }}/release/cast-server.exe

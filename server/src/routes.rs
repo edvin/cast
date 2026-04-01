@@ -186,71 +186,83 @@ fn safe_media_path(
     Ok(canonical)
 }
 
-fn build_episode_item(ep: &crate::library::Episode, series_id: &str, state: &AppState) -> EpisodeItem {
-    let progress = state.db.get_progress(&ep.id).map(|p| EpisodeProgress {
+/// Build an EpisodeItem using pre-loaded maps (avoids per-episode DB queries)
+fn build_episode_item_cached(
+    ep: &crate::library::Episode,
+    series_id: &str,
+    media_path: &std::path::Path,
+    progress_map: &std::collections::HashMap<String, crate::db::WatchProgress>,
+    ep_meta_map: &std::collections::HashMap<(String, u32, u32), crate::db::EpisodeMetadata>,
+) -> EpisodeItem {
+    let progress = progress_map.get(&ep.id).map(|p| EpisodeProgress {
         position_secs: p.position_secs,
         duration_secs: p.duration_secs,
         completed: p.completed,
     });
 
-    // Look up TMDB metadata by season/episode number
     let tmdb_meta = ep
         .season_number
         .zip(ep.episode_number)
-        .and_then(|(s, e)| state.db.get_episode_metadata_by_number(series_id, s, e));
+        .and_then(|(s, e)| ep_meta_map.get(&(series_id.to_string(), s, e)));
 
-    // Check for thumbnail file
-    let thumb_path = state.media_path.join(".thumbnails").join(format!("{}.jpg", ep.id));
+    let thumb_path = media_path.join(".thumbnails").join(format!("{}.jpg", ep.id));
     let has_thumbnail = thumb_path.exists();
 
     EpisodeItem {
         id: ep.id.clone(),
         title: tmdb_meta
-            .as_ref()
             .and_then(|m| m.title.clone())
             .unwrap_or_else(|| ep.title.clone()),
         index: ep.index,
         season_number: ep.season_number,
         episode_number: ep.episode_number,
         size_bytes: ep.size_bytes,
-        duration_secs: None, // populated from ffprobe cache if available
-        overview: tmdb_meta.as_ref().and_then(|m| m.overview.clone()),
-        air_date: tmdb_meta.as_ref().and_then(|m| m.air_date.clone()),
-        runtime_minutes: tmdb_meta.as_ref().and_then(|m| m.runtime_minutes),
+        duration_secs: None,
+        overview: tmdb_meta.and_then(|m| m.overview.clone()),
+        air_date: tmdb_meta.and_then(|m| m.air_date.clone()),
+        runtime_minutes: tmdb_meta.and_then(|m| m.runtime_minutes),
         has_thumbnail,
         progress,
     }
+}
+
+/// Build an EpisodeItem with individual DB lookups (for single-episode endpoints)
+fn build_episode_item(ep: &crate::library::Episode, series_id: &str, state: &AppState) -> EpisodeItem {
+    let progress_map = state.db.get_all_progress_map();
+    let ep_meta_map = state.db.get_all_episode_metadata();
+    build_episode_item_cached(ep, series_id, &state.media_path, &progress_map, &ep_meta_map)
 }
 
 // --- Handlers ---
 
 async fn list_series(State(state): State<Arc<AppState>>) -> Json<Vec<SeriesListItem>> {
     let lib = state.library.read().await;
+    // Batch load all metadata and progress in 2 queries instead of N*2
+    let all_meta = state.db.get_all_series_metadata();
+    let all_progress = state.db.get_all_progress_map();
+
     let mut result: Vec<SeriesListItem> = lib
         .series
         .values()
         .map(|s| {
-            let episode_ids: Vec<String> = s.episodes.iter().map(|e| e.id.clone()).collect();
-            let progress = state.db.get_series_progress(&episode_ids);
-            let watched_count = progress.iter().filter(|p| p.completed).count();
-            let meta = state.db.get_series_metadata(&s.id);
+            let watched_count = s
+                .episodes
+                .iter()
+                .filter(|ep| all_progress.get(&ep.id).map(|p| p.completed).unwrap_or(false))
+                .count();
+            let meta = all_meta.get(&s.id);
 
             SeriesListItem {
                 id: s.id.clone(),
-                title: meta
-                    .as_ref()
-                    .and_then(|m| m.title.clone())
-                    .unwrap_or_else(|| s.title.clone()),
+                title: meta.and_then(|m| m.title.clone()).unwrap_or_else(|| s.title.clone()),
                 episode_count: s.episodes.len(),
                 has_art: s.art.is_some(),
                 has_backdrop: s.backdrop.is_some(),
                 has_metadata: meta.is_some(),
-                overview: meta.as_ref().and_then(|m| m.overview.clone()),
-                genres: meta.as_ref().and_then(|m| m.genres.clone()),
-                rating: meta.as_ref().and_then(|m| m.rating),
-                year: meta
-                    .as_ref()
-                    .and_then(|m| m.first_air_date.as_ref().map(|d| d[..4].to_string())),
+                overview: meta.and_then(|m| m.overview.clone()),
+                genres: meta.and_then(|m| m.genres.clone()),
+                rating: meta.and_then(|m| m.rating),
+                year: meta.and_then(|m| m.first_air_date.as_ref().map(|d| d[..4].to_string())),
                 watched_count,
                 total_count: s.episodes.len(),
             }
@@ -270,10 +282,14 @@ async fn get_series(
         .find_series(&series_id)
         .ok_or_else(|| ApiError::not_found("Series not found"))?;
 
+    // 3 queries for the whole detail view
+    let all_progress = state.db.get_all_progress_map();
+    let all_ep_meta = state.db.get_all_episode_metadata();
+
     let episodes: Vec<EpisodeItem> = series
         .episodes
         .iter()
-        .map(|ep| build_episode_item(ep, &series.id, &state))
+        .map(|ep| build_episode_item_cached(ep, &series.id, &state.media_path, &all_progress, &all_ep_meta))
         .collect();
 
     let meta = state.db.get_series_metadata(&series.id);
@@ -371,6 +387,11 @@ async fn get_next_episode(
 
 async fn continue_watching(State(state): State<Arc<AppState>>) -> ApiResult<Json<Vec<ContinueWatchingItem>>> {
     let lib = state.library.read().await;
+    // 3 queries total for the entire endpoint
+    let all_meta = state.db.get_all_series_metadata();
+    let all_progress = state.db.get_all_progress_map();
+    let all_ep_meta = state.db.get_all_episode_metadata();
+
     let mut items: Vec<(String, ContinueWatchingItem)> = Vec::new();
 
     for series in lib.series.values() {
@@ -378,25 +399,29 @@ async fn continue_watching(State(state): State<Arc<AppState>>) -> ApiResult<Json
             continue;
         }
 
-        let episode_ids: Vec<String> = series.episodes.iter().map(|e| e.id.clone()).collect();
-        let all_progress = state.db.get_series_progress(&episode_ids);
+        // Filter progress entries for this series
+        let series_progress: Vec<&crate::db::WatchProgress> = series
+            .episodes
+            .iter()
+            .filter_map(|ep| all_progress.get(&ep.id))
+            .collect();
 
-        if all_progress.is_empty() {
+        if series_progress.is_empty() {
             continue;
         }
 
-        let meta = state.db.get_series_metadata(&series.id);
+        let meta = all_meta.get(&series.id);
         let series_title = meta
-            .as_ref()
             .and_then(|m| m.title.clone())
             .unwrap_or_else(|| series.title.clone());
 
-        // Check for in-progress episode (has position but not completed)
-        let in_progress = all_progress.iter().find(|p| !p.completed && p.position_secs > 0.0);
+        // Check for in-progress episode
+        let in_progress = series_progress.iter().find(|p| !p.completed && p.position_secs > 0.0);
 
         if let Some(current) = in_progress {
             if let Some(ep) = series.episodes.iter().find(|e| e.id == current.episode_id) {
-                let mut item = build_episode_item(ep, &series.id, &state);
+                let mut item =
+                    build_episode_item_cached(ep, &series.id, &state.media_path, &all_progress, &all_ep_meta);
                 item.progress = Some(EpisodeProgress {
                     position_secs: current.position_secs,
                     duration_secs: current.duration_secs,
@@ -420,14 +445,14 @@ async fn continue_watching(State(state): State<Arc<AppState>>) -> ApiResult<Json
         let max_completed_index = series
             .episodes
             .iter()
-            .filter(|ep| all_progress.iter().any(|p| p.episode_id == ep.id && p.completed))
+            .filter(|ep| all_progress.get(&ep.id).map(|p| p.completed).unwrap_or(false))
             .map(|ep| ep.index)
             .max();
 
         if let Some(idx) = max_completed_index {
             let next_idx = idx + 1;
             if let Some(next_ep) = series.episodes.iter().find(|e| e.index == next_idx) {
-                let most_recent = all_progress
+                let most_recent = series_progress
                     .iter()
                     .map(|p| p.updated_at.as_str())
                     .max()
@@ -439,19 +464,21 @@ async fn continue_watching(State(state): State<Arc<AppState>>) -> ApiResult<Json
                         series_id: series.id.clone(),
                         series_title,
                         has_art: series.art.is_some(),
-                        next_episode: build_episode_item(next_ep, &series.id, &state),
+                        next_episode: build_episode_item_cached(
+                            next_ep,
+                            &series.id,
+                            &state.media_path,
+                            &all_progress,
+                            &all_ep_meta,
+                        ),
                         reason: "next".to_string(),
                     },
                 ));
             }
-            // else: all_watched — skip this series
         }
-        // No completed episodes and no in-progress — skip
     }
 
-    // Sort by most recently updated progress (newest first)
     items.sort_by(|a, b| b.0.cmp(&a.0));
-
     Ok(Json(items.into_iter().map(|(_, item)| item).collect()))
 }
 

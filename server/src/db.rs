@@ -198,6 +198,75 @@ impl Database {
         Ok(())
     }
 
+    /// Load all series metadata in a single query, keyed by series_id
+    pub fn get_all_series_metadata(&self) -> std::collections::HashMap<String, SeriesMetadata> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT series_id, tmdb_id, title, overview, first_air_date, genres, rating
+                 FROM series_metadata",
+            )
+            .unwrap();
+
+        stmt.query_map([], |row| {
+            Ok(SeriesMetadata {
+                series_id: row.get(0)?,
+                tmdb_id: row.get::<_, Option<i64>>(1)?.map(|v| v as u64),
+                title: row.get(2)?,
+                overview: row.get(3)?,
+                first_air_date: row.get(4)?,
+                genres: row.get(5)?,
+                rating: row.get(6)?,
+            })
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .map(|m| (m.series_id.clone(), m))
+        .collect()
+    }
+
+    /// Load all watch progress in a single query, keyed by episode_id
+    pub fn get_all_progress_map(&self) -> std::collections::HashMap<String, WatchProgress> {
+        self.get_all_progress()
+            .into_iter()
+            .map(|p| (p.episode_id.clone(), p))
+            .collect()
+    }
+
+    /// Load all episode metadata in a single query, keyed by (series_id, season, episode)
+    pub fn get_all_episode_metadata(&self) -> std::collections::HashMap<(String, u32, u32), EpisodeMetadata> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT episode_id, series_id, tmdb_episode_id, season_number, episode_number,
+                        title, overview, air_date, runtime_minutes, still_url
+                 FROM episode_metadata",
+            )
+            .unwrap();
+
+        stmt.query_map([], |row| {
+            Ok(EpisodeMetadata {
+                episode_id: row.get(0)?,
+                series_id: row.get(1)?,
+                tmdb_episode_id: row.get::<_, Option<i64>>(2)?.map(|v| v as u64),
+                season_number: row.get::<_, Option<i64>>(3)?.map(|v| v as u32),
+                episode_number: row.get::<_, Option<i64>>(4)?.map(|v| v as u32),
+                title: row.get(5)?,
+                overview: row.get(6)?,
+                air_date: row.get(7)?,
+                runtime_minutes: row.get::<_, Option<i64>>(8)?.map(|v| v as u32),
+                still_url: row.get(9)?,
+            })
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .filter_map(|m| {
+            let key = (m.series_id.clone(), m.season_number?, m.episode_number?);
+            Some((key, m))
+        })
+        .collect()
+    }
+
     pub fn get_series_metadata(&self, series_id: &str) -> Option<SeriesMetadata> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(

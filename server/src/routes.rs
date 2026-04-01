@@ -884,4 +884,148 @@ mod tests {
         let arr = json.as_array().unwrap();
         assert_eq!(arr.len(), 1);
     }
+
+    // --- Path traversal security tests ---
+
+    /// Create a state with a tampered library containing paths that attempt directory traversal.
+    fn setup_traversal_state() -> (TempDir, Arc<AppState>, String, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let series_dir = dir.path().join("EvilShow");
+        fs::create_dir(&series_dir).unwrap();
+        fs::write(series_dir.join("ep.mp4"), b"video").unwrap();
+
+        // Create a file outside the media dir to prove it can't be served
+        fs::write(dir.path().join("secret.txt"), b"TOP SECRET").unwrap();
+
+        let db = crate::db::Database::new(dir.path()).unwrap();
+        let mut lib = crate::library::Library::scan(dir.path()).unwrap();
+
+        let series = lib.series.values_mut().next().unwrap();
+        let series_id = series.id.clone();
+        let episode_id = series.episodes[0].id.clone();
+
+        // Tamper the episode path to attempt traversal
+        series.episodes[0].path = "../../../etc/passwd".to_string();
+        // Tamper the art path
+        series.art = Some("../secret.txt".to_string());
+        // Tamper the backdrop path
+        series.backdrop = Some("../secret.txt".to_string());
+
+        let state = Arc::new(AppState {
+            library: RwLock::new(lib),
+            db,
+            media_path: dir.path().to_path_buf(),
+            tmdb: None,
+        });
+
+        (dir, state, series_id, episode_id)
+    }
+
+    #[tokio::test]
+    async fn stream_blocks_path_traversal() {
+        let (_dir, state, _series_id, episode_id) = setup_traversal_state();
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/episodes/{episode_id}/stream"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Should be 404 (file doesn't exist at traversal path) or 403
+        assert!(
+            response.status() == StatusCode::NOT_FOUND || response.status() == StatusCode::FORBIDDEN,
+            "Expected 404 or 403, got {}",
+            response.status()
+        );
+    }
+
+    #[tokio::test]
+    async fn art_blocks_path_traversal() {
+        let (_dir, state, series_id, _episode_id) = setup_traversal_state();
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/series/{series_id}/art"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            response.status() == StatusCode::NOT_FOUND || response.status() == StatusCode::FORBIDDEN,
+            "Expected 404 or 403, got {}",
+            response.status()
+        );
+        // Verify we did NOT serve the secret file
+        let bytes = body_to_bytes(response.into_body()).await;
+        assert_ne!(bytes, b"TOP SECRET");
+    }
+
+    #[tokio::test]
+    async fn backdrop_blocks_path_traversal() {
+        let (_dir, state, series_id, _episode_id) = setup_traversal_state();
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/series/{series_id}/backdrop"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            response.status() == StatusCode::NOT_FOUND || response.status() == StatusCode::FORBIDDEN,
+            "Expected 404 or 403, got {}",
+            response.status()
+        );
+        let bytes = body_to_bytes(response.into_body()).await;
+        assert_ne!(bytes, b"TOP SECRET");
+    }
+
+    #[tokio::test]
+    async fn thumbnail_blocks_path_traversal() {
+        let (_dir, state, _series_id, episode_id) = setup_traversal_state();
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/episodes/{episode_id}/thumbnail"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Thumbnail generation should fail because the video path is traversal
+        assert!(
+            response.status() == StatusCode::NOT_FOUND || response.status() == StatusCode::FORBIDDEN,
+            "Expected 404 or 403, got {}",
+            response.status()
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_with_range_blocks_path_traversal() {
+        let (_dir, state, _series_id, episode_id) = setup_traversal_state();
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/episodes/{episode_id}/stream"))
+                    .header("range", "bytes=0-10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            response.status() == StatusCode::NOT_FOUND || response.status() == StatusCode::FORBIDDEN,
+            "Expected 404 or 403, got {}",
+            response.status()
+        );
+    }
 }

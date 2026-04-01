@@ -9,6 +9,9 @@ app/Cast.xcodeproj/xcuserdata/
 app/Cast.xcodeproj/project.xcworkspace/xcuserdata/
 *.xcuserstate
 
+# Environment
+.env
+
 # IDE
 .idea/
 .vscode/

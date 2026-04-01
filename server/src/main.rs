@@ -45,6 +45,9 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() {
+    // Load .env file if present (before clap parses, so env vars are available)
+    dotenvy::dotenv().ok();
+
     let args = Args::parse();
 
     // Set up logging — file or stdout

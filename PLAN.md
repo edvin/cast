@@ -41,7 +41,7 @@ cast/
 │   └── src/
 │       ├── main.rs       # CLI args, startup, periodic rescan
 │       ├── library.rs    # Media directory scanner
-│       ├── db.rs         # SQLite watch progress (stored in .cast.db)
+│       ├── db.rs         # SQLite watch progress (stored in cast.db)
 │       ├── routes.rs     # All HTTP endpoints
 │       └── mdns.rs       # Bonjour advertisement
 ├── app/              # tvOS Xcode project (Swift/SwiftUI)
@@ -74,7 +74,7 @@ axum, tokio, tower-http, serde, rusqlite (bundled), walkdir, mdns-sd, clap, uuid
 4. If all watched → returns null with reason `"all_watched"`
 
 ### Watch Progress
-- Stored in `.cast.db` (SQLite) in the media directory
+- Stored in `cast.db` (SQLite) in the media directory
 - Episode marked `completed` when position ≥ 90% of duration
 - Single user, no auth
 

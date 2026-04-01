@@ -1291,4 +1291,4 @@ The tvOS app should:
 2. Load and display the series grid with artwork.
 3. Allow navigating to a series and seeing the episode list.
 4. Play episodes with full transport controls.
-5. Report progress back — verify by calling `GET /api/progress` on the server or checking `.cast.db`.
+5. Report progress back — verify by calling `GET /api/progress` on the server or checking `cast.db`.

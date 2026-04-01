@@ -2,6 +2,7 @@ mod db;
 mod library;
 mod mdns;
 mod routes;
+mod tmdb;
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -20,14 +21,19 @@ struct Args {
     port: u16,
 
     /// Server display name for Bonjour
-    #[arg(short, long, default_value = "Cast Server")]
+    #[arg(short = 'n', long, default_value = "Cast Server")]
     name: String,
+
+    /// TMDB API key for fetching series metadata and artwork
+    #[arg(long, env = "TMDB_API_KEY")]
+    tmdb_key: Option<String>,
 }
 
 pub struct AppState {
     pub library: RwLock<library::Library>,
     pub db: db::Database,
     pub media_path: PathBuf,
+    pub tmdb: Option<tmdb::TmdbClient>,
 }
 
 #[tokio::main]
@@ -52,10 +58,34 @@ async fn main() {
         lib.series.values().map(|s| s.episodes.len()).sum::<usize>()
     );
 
+    let tmdb_client = args.tmdb_key.map(|key| {
+        tracing::info!("TMDB integration enabled");
+        tmdb::TmdbClient::new(key)
+    });
+
+    // On startup, fetch missing art if TMDB is configured
+    if let Some(ref client) = tmdb_client {
+        let series_info: Vec<(String, bool)> = lib
+            .series
+            .values()
+            .map(|s| (s.title.clone(), s.art.is_some()))
+            .collect();
+        let missing = series_info.iter().filter(|(_, has)| !has).count();
+        if missing > 0 {
+            tracing::info!("Fetching artwork for {missing} series without art...");
+            let downloaded = tmdb::fetch_missing_art(client, &media_path, series_info).await;
+            tracing::info!("Downloaded artwork for {downloaded} series");
+        }
+    }
+
+    // Rescan after art download so new posters are picked up
+    let lib = library::Library::scan(&media_path).expect("Failed to rescan library");
+
     let state = Arc::new(AppState {
         library: RwLock::new(lib),
         db,
         media_path: media_path.clone(),
+        tmdb: tmdb_client,
     });
 
     // Start mDNS advertisement

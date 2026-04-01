@@ -18,7 +18,7 @@ pub struct WatchProgress {
 
 impl Database {
     pub fn new(media_path: &Path) -> Result<Self, rusqlite::Error> {
-        let db_path = media_path.join(".cast.db");
+        let db_path = media_path.join("cast.db");
         let conn = Connection::open(db_path)?;
 
         conn.execute_batch(
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn create_database() {
         let (dir, _db) = make_db();
-        assert!(dir.path().join(".cast.db").exists());
+        assert!(dir.path().join("cast.db").exists());
     }
 
     #[test]

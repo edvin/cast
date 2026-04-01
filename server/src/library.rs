@@ -14,6 +14,7 @@ const ART_NAMES: &[&str] = &[
     "banner.jpg",
     "banner.png",
 ];
+const BACKDROP_NAMES: &[&str] = &["backdrop.jpg", "backdrop.png", "fanart.jpg", "fanart.png"];
 
 // UUID v5 namespace for generating stable IDs from paths
 const NAMESPACE: Uuid = Uuid::from_bytes([
@@ -34,6 +35,8 @@ pub struct Series {
     pub path: String,
     /// Art file relative path (if found)
     pub art: Option<String>,
+    /// Backdrop/fanart relative path (if found)
+    pub backdrop: Option<String>,
     pub episodes: Vec<Episode>,
 }
 
@@ -89,6 +92,16 @@ impl Library {
                 }
             });
 
+            // Find backdrop
+            let backdrop = BACKDROP_NAMES.iter().find_map(|name| {
+                let path = series_path.join(name);
+                if path.exists() {
+                    Some(format!("{rel_path}/{name}"))
+                } else {
+                    None
+                }
+            });
+
             // Collect episodes (video files in the series directory)
             let mut video_files: Vec<_> = std::fs::read_dir(&series_path)?
                 .filter_map(|e| e.ok())
@@ -134,6 +147,7 @@ impl Library {
                     title: dir_name,
                     path: rel_path,
                     art,
+                    backdrop,
                     episodes,
                 },
             );

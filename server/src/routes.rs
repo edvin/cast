@@ -21,6 +21,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/episodes/{episode_id}/progress", get(get_progress))
         .route("/api/episodes/{episode_id}/progress", post(update_progress))
         .route("/api/progress", get(get_all_progress))
+        .route("/api/series/{series_id}/backdrop", get(get_series_backdrop))
+        .route("/api/metadata/fetch", post(fetch_metadata))
         .with_state(state)
 }
 
@@ -32,6 +34,7 @@ struct SeriesListItem {
     title: String,
     episode_count: usize,
     has_art: bool,
+    has_backdrop: bool,
     /// Summary of watch state for this series
     watched_count: usize,
     total_count: usize,
@@ -42,6 +45,7 @@ struct SeriesDetail {
     id: String,
     title: String,
     has_art: bool,
+    has_backdrop: bool,
     episodes: Vec<EpisodeItem>,
 }
 
@@ -92,6 +96,7 @@ async fn list_series(State(state): State<Arc<AppState>>) -> Json<Vec<SeriesListI
                 title: s.title.clone(),
                 episode_count: s.episodes.len(),
                 has_art: s.art.is_some(),
+                has_backdrop: s.backdrop.is_some(),
                 watched_count,
                 total_count: s.episodes.len(),
             }
@@ -133,6 +138,7 @@ async fn get_series(
         id: series.id.clone(),
         title: series.title.clone(),
         has_art: series.art.is_some(),
+        has_backdrop: series.backdrop.is_some(),
         episodes,
     }))
 }
@@ -362,6 +368,68 @@ async fn get_all_progress(State(state): State<Arc<AppState>>) -> Json<Vec<crate:
     Json(state.db.get_all_progress())
 }
 
+async fn get_series_backdrop(
+    State(state): State<Arc<AppState>>,
+    Path(series_id): Path<String>,
+) -> Result<Response, StatusCode> {
+    let lib = state.library.read().await;
+    let series = lib.find_series(&series_id).ok_or(StatusCode::NOT_FOUND)?;
+    let backdrop_rel = series.backdrop.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    let backdrop_path = state.media_path.join(backdrop_rel);
+
+    if !backdrop_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let content_type = mime_guess::from_path(&backdrop_path)
+        .first_or_octet_stream()
+        .to_string();
+
+    let data = tokio::fs::read(&backdrop_path)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(([(header::CONTENT_TYPE, content_type)], data).into_response())
+}
+
+#[derive(Serialize)]
+struct FetchMetadataResponse {
+    downloaded: usize,
+    message: String,
+}
+
+/// Trigger TMDB metadata/art fetch for series missing artwork
+async fn fetch_metadata(State(state): State<Arc<AppState>>) -> Result<Json<FetchMetadataResponse>, StatusCode> {
+    let client = state.tmdb.as_ref().ok_or_else(|| {
+        tracing::warn!("TMDB fetch requested but no API key configured");
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
+
+    let series_info: Vec<(String, bool)> = {
+        let lib = state.library.read().await;
+        lib.series
+            .values()
+            .map(|s| (s.title.clone(), s.art.is_some()))
+            .collect()
+    };
+
+    let missing = series_info.iter().filter(|(_, has)| !has).count();
+    let downloaded = crate::tmdb::fetch_missing_art(client, &state.media_path, series_info).await;
+
+    // Rescan library to pick up new art files
+    if downloaded > 0 {
+        match crate::library::Library::scan(&state.media_path) {
+            Ok(lib) => *state.library.write().await = lib,
+            Err(e) => tracing::warn!("Rescan after metadata fetch failed: {e}"),
+        }
+    }
+
+    Ok(Json(FetchMetadataResponse {
+        downloaded,
+        message: format!("{downloaded} of {missing} series updated"),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,6 +462,7 @@ mod tests {
             library: RwLock::new(lib),
             db,
             media_path: dir.path().to_path_buf(),
+            tmdb: None,
         });
 
         (dir, state, series_id, episode_ids)
@@ -694,6 +763,7 @@ mod tests {
             library: RwLock::new(lib),
             db,
             media_path: dir.path().to_path_buf(),
+            tmdb: None,
         });
 
         let response = app(state)

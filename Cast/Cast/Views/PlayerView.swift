@@ -10,22 +10,35 @@ struct PlayerContainerView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var showCast = false
+    @State private var playerRef: AVPlayer?
 
     var body: some View {
         PlayerView(
             client: client,
             episode: episode,
             resumePosition: resumePosition,
-            onDismiss: { dismiss() },
-            onShowCast: { showCast = true }
+            onDismiss: { stopAndDismiss() },
+            onShowCast: { showCast = true },
+            onPlayerReady: { playerRef = $0 }
         )
         .ignoresSafeArea()
-        .onExitCommand { dismiss() }
+        .onExitCommand { stopAndDismiss() }
+        .onDisappear { stopPlayer() }
         .fullScreenCover(isPresented: $showCast) {
             NavigationStack {
                 EpisodeCastView(episode: episode, client: client)
             }
         }
+    }
+
+    private func stopPlayer() {
+        playerRef?.pause()
+        playerRef?.replaceCurrentItem(with: nil)
+    }
+
+    private func stopAndDismiss() {
+        stopPlayer()
+        dismiss()
     }
 }
 
@@ -37,6 +50,7 @@ struct PlayerView: UIViewControllerRepresentable {
     let resumePosition: Double
     var onDismiss: (() -> Void)?
     var onShowCast: (() -> Void)?
+    var onPlayerReady: ((AVPlayer) -> Void)?
 
     @Environment(\.dismiss) private var dismiss
 
@@ -67,6 +81,7 @@ struct PlayerView: UIViewControllerRepresentable {
 
         context.coordinator.startPlayback(player: player)
         context.coordinator.controller = controller
+        onPlayerReady?(player)
         return controller
     }
 

@@ -48,10 +48,18 @@ pub struct AppState {
 async fn main() {
     // Load .env file if present (before clap parses, so env vars are available)
     // Try current directory first, then next to the executable
-    if dotenvy::dotenv().is_err() {
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                let _ = dotenvy::from_path(dir.join(".env"));
+    match dotenvy::dotenv() {
+        Ok(path) => eprintln!("Loaded .env from {}", path.display()),
+        Err(e) => {
+            eprintln!(".env not found in cwd ({}), trying exe dir...", e);
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(dir) = exe.parent() {
+                    let env_path = dir.join(".env");
+                    match dotenvy::from_path(&env_path) {
+                        Ok(()) => eprintln!("Loaded .env from {}", env_path.display()),
+                        Err(e) => eprintln!(".env not found at {} either: {}", env_path.display(), e),
+                    }
+                }
             }
         }
     }

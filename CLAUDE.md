@@ -30,6 +30,8 @@ Local network series streamer — Rust server + tvOS Apple TV app.
 - `GET /api/episodes/{id}/thumbnail` — episode thumbnail (generated on-demand via ffmpeg)
 - `GET/POST /api/episodes/{id}/progress` — get/update watch progress
 - `DELETE /api/episodes/{id}/progress` — reset episode watch progress (mark unwatched)
+- `GET /api/episodes/{id}/subtitles` — list available external subtitle languages
+- `GET /api/episodes/{id}/subtitles/{lang}` — serve .srt converted to WebVTT
 - `GET /api/progress` — all watch progress entries
 - `POST /api/metadata/fetch` — trigger TMDB metadata + art fetch
 - All error responses are JSON: `{"error": "...", "code": 404, "detail": "..."}`

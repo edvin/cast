@@ -82,6 +82,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/series/{series_id}/backdrop", get(get_series_backdrop))
         .route("/api/episodes/{episode_id}/thumbnail", get(get_episode_thumbnail))
         .route("/api/episodes/{episode_id}/progress", delete(delete_progress))
+        .route("/api/episodes/{episode_id}/subtitles", get(list_subtitles))
+        .route("/api/episodes/{episode_id}/subtitles/{language}", get(get_subtitle))
         .route("/api/series/{series_id}/progress", delete(delete_series_progress))
         .route("/api/metadata/fetch", post(fetch_metadata))
         .with_state(state)
@@ -131,6 +133,7 @@ struct EpisodeItem {
     air_date: Option<String>,
     runtime_minutes: Option<u32>,
     has_thumbnail: bool,
+    subtitle_languages: Vec<String>,
     progress: Option<EpisodeProgress>,
 }
 
@@ -222,6 +225,7 @@ fn build_episode_item_cached(
         air_date: tmdb_meta.and_then(|m| m.air_date.clone()),
         runtime_minutes: tmdb_meta.and_then(|m| m.runtime_minutes),
         has_thumbnail,
+        subtitle_languages: ep.subtitles.iter().map(|s| s.language.clone()).collect(),
         progress,
     }
 }
@@ -711,6 +715,78 @@ async fn get_episode_thumbnail(
         .map_err(|_| ApiError::internal("Failed to read file"))?;
 
     Ok(([(header::CONTENT_TYPE, "image/jpeg".to_string())], data).into_response())
+}
+
+#[derive(Serialize)]
+struct SubtitleInfo {
+    language: String,
+    label: String,
+}
+
+fn language_label(code: &str) -> String {
+    match code {
+        "en" => "English".to_string(),
+        "sv" => "Swedish".to_string(),
+        "de" => "German".to_string(),
+        "fr" => "French".to_string(),
+        "es" => "Spanish".to_string(),
+        "no" => "Norwegian".to_string(),
+        "da" => "Danish".to_string(),
+        "fi" => "Finnish".to_string(),
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+                None => other.to_string(),
+            }
+        }
+    }
+}
+
+async fn list_subtitles(
+    State(state): State<Arc<AppState>>,
+    Path(episode_id): Path<String>,
+) -> ApiResult<Json<Vec<SubtitleInfo>>> {
+    let lib = state.library.read().await;
+    let (_series, episode) = lib
+        .find_episode(&episode_id)
+        .ok_or_else(|| ApiError::not_found("Episode not found"))?;
+
+    let subs: Vec<SubtitleInfo> = episode
+        .subtitles
+        .iter()
+        .map(|s| SubtitleInfo {
+            label: language_label(&s.language),
+            language: s.language.clone(),
+        })
+        .collect();
+
+    Ok(Json(subs))
+}
+
+async fn get_subtitle(
+    State(state): State<Arc<AppState>>,
+    Path((episode_id, language)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let lib = state.library.read().await;
+    let (_series, episode) = lib
+        .find_episode(&episode_id)
+        .ok_or_else(|| ApiError::not_found("Episode not found"))?;
+
+    let sub = episode
+        .subtitles
+        .iter()
+        .find(|s| s.language == language)
+        .ok_or_else(|| ApiError::not_found("Subtitle language not found"))?;
+
+    let sub_path = safe_media_path(&state.media_path, &sub.path)?;
+    let srt_content = tokio::fs::read_to_string(&sub_path)
+        .await
+        .map_err(|_| ApiError::internal("Failed to read subtitle file"))?;
+
+    let vtt = crate::subtitle::srt_to_webvtt(&srt_content);
+
+    Ok(([(header::CONTENT_TYPE, "text/vtt".to_string())], vtt).into_response())
 }
 
 #[derive(Serialize)]
@@ -1386,5 +1462,44 @@ mod tests {
         assert_eq!(arr[0]["series_title"], "ShowA");
         assert_eq!(arr[0]["reason"], "resume");
         assert_eq!(arr[0]["next_episode"]["id"], ep_a1_id);
+    }
+
+    #[tokio::test]
+    async fn list_subtitles_returns_empty_for_no_srt_files() {
+        let (_dir, state, _series_id, ep_ids) = setup_test_state();
+        let ep_id = &ep_ids[0];
+
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/episodes/{ep_id}/subtitles"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_to_json(response.into_body()).await;
+        let arr = json.as_array().unwrap();
+        assert!(arr.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_subtitle_returns_404_for_unknown_language() {
+        let (_dir, state, _series_id, ep_ids) = setup_test_state();
+        let ep_id = &ep_ids[0];
+
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/episodes/{ep_id}/subtitles/en"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

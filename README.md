@@ -34,6 +34,14 @@ media/
 - `03 - Title.mp4`
 - `03.mp4`
 
+**Subtitles** — external `.srt` files are detected alongside video files:
+- `S01E01.srt` — matches `S01E01.mp4`, defaults to English
+- `S01E01.en.srt` — English subtitles
+- `S01E01.sv.srt` — Swedish subtitles
+- Multiple languages supported per episode
+
+Embedded subtitles in the video container also work automatically.
+
 **Artwork** — place any of these in a series folder and they'll be detected automatically:
 - Poster: `poster.jpg`, `poster.png`, `folder.jpg`, `cover.jpg`
 - Backdrop: `backdrop.jpg`, `fanart.jpg`
@@ -150,6 +158,8 @@ Start-ScheduledTask -TaskName CastServer
 | GET | `/api/episodes/{id}/progress` | Watch progress |
 | POST | `/api/episodes/{id}/progress` | Update watch progress |
 | DELETE | `/api/episodes/{id}/progress` | Mark episode as unwatched |
+| GET | `/api/episodes/{id}/subtitles` | List available subtitle languages |
+| GET | `/api/episodes/{id}/subtitles/{lang}` | Subtitle file (SRT converted to WebVTT) |
 | POST | `/api/metadata/fetch` | Trigger TMDB metadata refresh |
 
 All error responses return JSON: `{"error": "...", "code": 404, "detail": null}`

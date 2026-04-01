@@ -57,6 +57,14 @@ pub struct Episode {
     pub index: usize,
     pub season_number: Option<u32>,
     pub episode_number: Option<u32>,
+    /// External subtitle files found (relative paths from media root)
+    pub subtitles: Vec<SubtitleFile>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SubtitleFile {
+    pub language: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -181,6 +189,68 @@ pub fn parse_episode_filename(filename: &str) -> ParsedEpisodeInfo {
     }
 }
 
+fn normalize_language(lang: &str) -> String {
+    match lang.to_lowercase().as_str() {
+        "en" | "eng" | "english" => "en".to_string(),
+        "sv" | "swe" | "swedish" => "sv".to_string(),
+        "de" | "ger" | "german" | "deu" => "de".to_string(),
+        "fr" | "fre" | "french" | "fra" => "fr".to_string(),
+        "es" | "spa" | "spanish" => "es".to_string(),
+        "no" | "nor" | "norwegian" => "no".to_string(),
+        "da" | "dan" | "danish" => "da".to_string(),
+        "fi" | "fin" | "finnish" => "fi".to_string(),
+        other => other.to_lowercase(),
+    }
+}
+
+fn find_subtitle_files(series_path: &Path, video_stem: &str, rel_path: &str) -> Vec<SubtitleFile> {
+    let mut subtitles = Vec::new();
+
+    let entries = match std::fs::read_dir(series_path) {
+        Ok(entries) => entries,
+        Err(_) => return subtitles,
+    };
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if !ext.eq_ignore_ascii_case("srt") {
+            continue;
+        }
+
+        let srt_stem = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        // Check for exact match: video_stem.srt
+        if srt_stem.eq_ignore_ascii_case(video_stem) {
+            let filename = entry.file_name().to_string_lossy().to_string();
+            subtitles.push(SubtitleFile {
+                language: "en".to_string(),
+                path: format!("{rel_path}/{filename}"),
+            });
+            continue;
+        }
+
+        // Check for language suffix: video_stem.lang.srt
+        if let Some(rest) = srt_stem.strip_prefix(video_stem) {
+            if let Some(lang) = rest.strip_prefix('.') {
+                if !lang.is_empty() && !lang.contains('.') {
+                    let filename = entry.file_name().to_string_lossy().to_string();
+                    subtitles.push(SubtitleFile {
+                        language: normalize_language(lang),
+                        path: format!("{rel_path}/{filename}"),
+                    });
+                }
+            }
+        }
+    }
+
+    subtitles.sort_by(|a, b| a.path.cmp(&b.path));
+    subtitles
+}
+
 impl Library {
     pub fn scan(media_root: &Path) -> Result<Self, std::io::Error> {
         let mut series_map = BTreeMap::new();
@@ -253,6 +323,13 @@ impl Library {
 
                     let parsed = parse_episode_filename(&filename);
 
+                    let video_stem = Path::new(&filename)
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let subtitles = find_subtitle_files(&series_path, &video_stem, &rel_path);
+
                     Episode {
                         id: stable_id(&ep_rel_path),
                         title: parsed.title,
@@ -262,6 +339,7 @@ impl Library {
                         index: i,
                         season_number: parsed.season,
                         episode_number: parsed.episode,
+                        subtitles,
                     }
                 })
                 .collect();
@@ -674,5 +752,73 @@ mod tests {
         let lib = Library::scan(dir.path()).unwrap();
         let series = lib.series.values().next().unwrap();
         assert_eq!(series.tmdb_id_override, None);
+    }
+
+    // --- subtitle detection tests ---
+
+    #[test]
+    fn subtitle_matching_srt_detected() {
+        let dir = make_media_dir();
+        let series_dir = dir.path().join("Show");
+        fs::create_dir(&series_dir).unwrap();
+        fs::write(series_dir.join("S01E01.mp4"), b"video").unwrap();
+        fs::write(series_dir.join("S01E01.srt"), b"subs").unwrap();
+
+        let lib = Library::scan(dir.path()).unwrap();
+        let series = lib.series.values().next().unwrap();
+        assert_eq!(series.episodes[0].subtitles.len(), 1);
+        assert_eq!(series.episodes[0].subtitles[0].language, "en");
+        assert_eq!(series.episodes[0].subtitles[0].path, "Show/S01E01.srt");
+    }
+
+    #[test]
+    fn subtitle_language_suffix_detected() {
+        let dir = make_media_dir();
+        let series_dir = dir.path().join("Show");
+        fs::create_dir(&series_dir).unwrap();
+        fs::write(series_dir.join("S01E01.mp4"), b"video").unwrap();
+        fs::write(series_dir.join("S01E01.en.srt"), b"subs").unwrap();
+
+        let lib = Library::scan(dir.path()).unwrap();
+        let series = lib.series.values().next().unwrap();
+        assert_eq!(series.episodes[0].subtitles.len(), 1);
+        assert_eq!(series.episodes[0].subtitles[0].language, "en");
+        assert_eq!(series.episodes[0].subtitles[0].path, "Show/S01E01.en.srt");
+    }
+
+    #[test]
+    fn subtitle_multiple_files_detected() {
+        let dir = make_media_dir();
+        let series_dir = dir.path().join("Show");
+        fs::create_dir(&series_dir).unwrap();
+        fs::write(series_dir.join("S01E01.mp4"), b"video").unwrap();
+        fs::write(series_dir.join("S01E01.srt"), b"subs").unwrap();
+        fs::write(series_dir.join("S01E01.sv.srt"), b"subs sv").unwrap();
+        fs::write(series_dir.join("S01E01.french.srt"), b"subs fr").unwrap();
+
+        let lib = Library::scan(dir.path()).unwrap();
+        let series = lib.series.values().next().unwrap();
+        assert_eq!(series.episodes[0].subtitles.len(), 3);
+
+        let langs: Vec<&str> = series.episodes[0]
+            .subtitles
+            .iter()
+            .map(|s| s.language.as_str())
+            .collect();
+        assert!(langs.contains(&"en"));
+        assert!(langs.contains(&"sv"));
+        assert!(langs.contains(&"fr"));
+    }
+
+    #[test]
+    fn subtitle_no_srt_gives_empty_vec() {
+        let dir = make_media_dir();
+        let series_dir = dir.path().join("Show");
+        fs::create_dir(&series_dir).unwrap();
+        fs::write(series_dir.join("S01E01.mp4"), b"video").unwrap();
+
+        let lib = Library::scan(dir.path()).unwrap();
+        let series = lib.series.values().next().unwrap();
+        assert!(series.episodes[0].subtitles.is_empty());
     }
 }

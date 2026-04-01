@@ -3,6 +3,7 @@ mod library;
 mod mdns;
 mod media;
 mod routes;
+mod subtitle;
 mod tmdb;
 
 use clap::Parser;

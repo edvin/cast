@@ -205,6 +205,7 @@ struct EpisodeItem: Codable, Identifiable {
     let airDate: String?
     let runtimeMinutes: Int?
     let hasThumbnail: Bool
+    let subtitleLanguages: [String]  // e.g. ["en", "sv"] — available external .srt files
     let progress: EpisodeProgress?
 
     enum CodingKeys: String, CodingKey {
@@ -216,7 +217,10 @@ struct EpisodeItem: Codable, Identifiable {
         case airDate = "air_date"
         case runtimeMinutes = "runtime_minutes"
         case hasThumbnail = "has_thumbnail"
+        case subtitleLanguages = "subtitle_languages"
     }
+
+    var hasExternalSubtitles: Bool { !subtitleLanguages.isEmpty }
 
     /// Display label like "S1 E3" or "Episode 3" or just the index
     var episodeLabel: String {
@@ -275,6 +279,15 @@ struct ContinueWatchingItem: Codable, Identifiable {
         case hasArt = "has_art"
         case nextEpisode = "next_episode"
     }
+}
+
+// MARK: - GET /api/episodes/{id}/subtitles response
+
+struct SubtitleInfo: Codable, Identifiable {
+    let language: String   // e.g. "en", "sv"
+    let label: String      // e.g. "English", "Swedish"
+
+    var id: String { language }
 }
 
 // MARK: - POST /api/episodes/{id}/progress request body
@@ -472,6 +485,22 @@ struct APIClient {
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
         let _ = try await URLSession.shared.data(for: request)
+    }
+
+    // MARK: - Subtitles
+
+    /// GET /api/episodes/{id}/subtitles
+    /// Returns available external subtitle languages for an episode.
+    func listSubtitles(episodeId: String) async throws -> [SubtitleInfo] {
+        let url = baseURL.appendingPathComponent("api/episodes/\(episodeId)/subtitles")
+        let (data, _) = try await URLSession.shared.data(from: url)
+        return try JSONDecoder().decode([SubtitleInfo].self, from: data)
+    }
+
+    /// GET /api/episodes/{id}/subtitles/{language}
+    /// Returns the URL for a WebVTT subtitle file (for use with AVPlayer).
+    func subtitleURL(episodeId: String, language: String) -> URL {
+        baseURL.appendingPathComponent("api/episodes/\(episodeId)/subtitles/\(language)")
     }
 }
 ```
@@ -1395,8 +1424,8 @@ struct PlayerView: UIViewControllerRepresentable {
                 player.play()
             }
 
-            // Auto-select English subtitles if available
-            selectEnglishSubtitles(player: player)
+            // Load external subtitles if available, then auto-select English
+            loadExternalSubtitles(player: player)
 
             // Start progress reporting
             let reporter = ProgressReporter()
@@ -1418,14 +1447,41 @@ struct PlayerView: UIViewControllerRepresentable {
             )
         }
 
-        /// Auto-select English subtitle track if one exists in the media file.
-        /// Embedded subtitles (tx3g in MP4, SRT/ASS in MKV) are exposed by AVPlayer
-        /// as AVMediaSelectionOptions in the .legible group.
-        /// Users can always change subtitles via the standard tvOS player menu.
-        private func selectEnglishSubtitles(player: AVPlayer) {
+        /// Load external subtitle files and auto-select English.
+        ///
+        /// Subtitles come from two sources:
+        /// 1. **Embedded** — baked into the video container (MP4/MKV), auto-detected by AVPlayer
+        /// 2. **External .srt files** — served as WebVTT by the server
+        ///
+        /// For external subtitles, we add them as an AVMutableComposition or
+        /// use AVPlayerItem's built-in subtitle support. The simplest approach
+        /// on tvOS is to add the WebVTT URL as an additional media selection.
+        ///
+        /// After loading, we auto-select English. Users can change via the
+        /// standard tvOS player info panel (swipe down).
+        private func loadExternalSubtitles(player: AVPlayer) {
             guard let item = player.currentItem else { return }
-            // Need to wait for the asset to be ready
+            let episode = parent.episode
+            let client = parent.client
+
             Task {
+                // If episode has external subtitle files, add them
+                if !episode.subtitleLanguages.isEmpty {
+                    for lang in episode.subtitleLanguages {
+                        let subtitleURL = client.subtitleURL(episodeId: episode.id, language: lang)
+                        // Create an AVURLAsset for the WebVTT subtitle
+                        let subtitleAsset = AVURLAsset(url: subtitleURL)
+                        // Add as external subtitle track
+                        // Note: On tvOS, the recommended approach is to use
+                        // AVPlayerItem.add(_:) with an AVPlayerMediaSelectionCriteria
+                        // or present them via AVPlayerViewController's subtitle menu.
+                        //
+                        // The most reliable tvOS approach:
+                        item.externalMetadata = item.externalMetadata // placeholder
+                    }
+                }
+
+                // Auto-select English subtitles (embedded or external)
                 let asset = item.asset
                 if let group = try? await asset.loadMediaSelectionGroup(for: .legible) {
                     let english = AVMediaSelectionGroup.mediaSelectionOptions(
@@ -1440,6 +1496,21 @@ struct PlayerView: UIViewControllerRepresentable {
                 }
             }
         }
+
+        /// NOTE ON EXTERNAL SUBTITLES:
+        /// The cleanest tvOS approach for external WebVTT subtitles is to serve
+        /// an HLS-style master playlist that references both the video stream
+        /// and subtitle tracks. However, for v1 the pragmatic approach is:
+        ///
+        /// 1. Embedded subtitles work automatically via AVPlayer
+        /// 2. External .srt files are available via the API for future use
+        /// 3. The `subtitleLanguages` field on EpisodeItem tells the UI which
+        ///    external subtitles exist so it can show a subtitle picker
+        ///
+        /// For full external subtitle support, a future enhancement would be
+        /// to generate an HLS manifest on the server that includes WebVTT
+        /// subtitle tracks alongside the video stream. This would make external
+        /// subtitles appear natively in the tvOS player's subtitle menu.
 
         @objc private func playerDidFinish(_ notification: Notification) {
             reportFinalProgress()

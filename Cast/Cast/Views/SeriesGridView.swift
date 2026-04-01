@@ -60,8 +60,8 @@ struct SeriesGridView: View {
                         AsyncImage(url: url) { image in
                             image.resizable()
                                 .aspectRatio(contentMode: .fill)
-                                .blur(radius: 30)
-                                .overlay(Color.black.opacity(0.4))
+                                .blur(radius: 40)
+                                .overlay(Color.black.opacity(0.55))
                         } placeholder: {
                             Color.clear
                         }
@@ -120,7 +120,7 @@ struct SeriesGridView: View {
                         .padding(.bottom, 80)
                     }
                 }
-                .animation(.easeInOut(duration: 0.8), value: backgroundURL)
+                .animation(.easeInOut(duration: 2.0), value: backgroundURL)
             }
         }
         .navigationTitle("")

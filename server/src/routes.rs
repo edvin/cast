@@ -590,116 +590,155 @@ async fn stream_episode(
     }
 }
 
-/// Remux a non-MP4 file to fragmented MP4 via ffmpeg, streamed to the client.
-/// Uses `-movflags frag_keyframe+empty_moov+faststart` so the MP4 is streamable
-/// without needing the full file written first.
-/// Remux a non-MP4 file to MP4 via ffmpeg, caching in .remux/ directory.
-/// Serves the cached file with full byte-range support for AVPlayer seeking.
+/// Remux a non-MP4 file to MP4 via ffmpeg.
+/// - If a cached .remux/*.mp4 exists, serve it with full byte-range support.
+/// - Otherwise, stream a fragmented MP4 directly from ffmpeg stdout (instant start)
+///   while simultaneously caching to disk for future plays.
 async fn stream_remuxed(
     file_path: std::path::PathBuf,
     headers: HeaderMap,
     _file_size: u64,
 ) -> ApiResult<Response> {
-    // Cache remuxed files alongside the .thumbnails dir
     let cache_dir = file_path.parent().unwrap().join(".remux");
     let _ = std::fs::create_dir_all(&cache_dir);
 
     let stem = file_path.file_stem().unwrap_or_default().to_string_lossy();
     let cached_path = cache_dir.join(format!("{stem}.mp4"));
 
-    // Remux if not already cached
-    if !cached_path.exists() {
-        tracing::info!("Remuxing {:?} → {:?}", file_path.file_name().unwrap(), cached_path.file_name().unwrap());
+    // If already cached, serve with full byte-range support
+    if cached_path.exists() {
+        let file_size = cached_path.metadata().map(|m| m.len())
+            .map_err(|_| ApiError::internal("Remuxed file not found"))?;
 
-        let output = tokio::task::spawn_blocking({
-            let file_path = file_path.clone();
-            let cached_path = cached_path.clone();
-            move || {
-                std::process::Command::new("ffmpeg")
-                    .arg("-hide_banner")
-                    .arg("-loglevel").arg("warning")
-                    .arg("-i").arg(&file_path)
-                    .arg("-c:v").arg("copy")
-                    .arg("-c:a").arg("aac")
-                    .arg("-b:a").arg("192k")
-                    .arg("-ac").arg("2")
-                    .arg("-map").arg("0:v:0")
-                    .arg("-map").arg("0:a:0")
-                    .arg("-map").arg("0:s?")          // include all subtitle streams
-                    .arg("-c:s").arg("mov_text")       // convert subs to MP4-compatible format
-                    .arg("-movflags").arg("+faststart")
-                    .arg("-y")
-                    .arg(&cached_path)
-                    .output()
+        let range = headers
+            .get(header::RANGE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| parse_range(s, file_size));
+
+        return match range {
+            Some((start, end)) => {
+                let length = end - start + 1;
+                let mut file = tokio::fs::File::open(&cached_path).await
+                    .map_err(|_| ApiError::internal("Failed to read remuxed file"))?;
+                file.seek(std::io::SeekFrom::Start(start)).await
+                    .map_err(|_| ApiError::internal("Failed to seek"))?;
+                let stream = ReaderStream::new(file.take(length));
+                let body = axum::body::Body::from_stream(stream);
+                Ok(Response::builder()
+                    .status(StatusCode::PARTIAL_CONTENT)
+                    .header(header::CONTENT_TYPE, "video/mp4")
+                    .header(header::CONTENT_LENGTH, length.to_string())
+                    .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{file_size}"))
+                    .header(header::ACCEPT_RANGES, "bytes")
+                    .body(body).unwrap())
             }
-        })
-        .await
-        .map_err(|_| ApiError::internal("Remux task failed"))?
+            None => {
+                let file = tokio::fs::File::open(&cached_path).await
+                    .map_err(|_| ApiError::internal("Failed to read remuxed file"))?;
+                let stream = ReaderStream::new(file);
+                let body = axum::body::Body::from_stream(stream);
+                Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "video/mp4")
+                    .header(header::CONTENT_LENGTH, file_size.to_string())
+                    .header(header::ACCEPT_RANGES, "bytes")
+                    .body(body).unwrap())
+            }
+        };
+    }
+
+    // Not cached — stream directly from ffmpeg as fragmented MP4 (instant start)
+    // and tee the output to a cache file for future plays
+    tracing::info!("Streaming+caching {:?}", file_path.file_name().unwrap());
+
+    let mut child = std::process::Command::new("ffmpeg")
+        .arg("-hide_banner")
+        .arg("-loglevel").arg("warning")
+        .arg("-i").arg(&file_path)
+        .arg("-c:v").arg("copy")
+        .arg("-c:a").arg("aac")
+        .arg("-b:a").arg("192k")
+        .arg("-ac").arg("2")
+        .arg("-map").arg("0:v:0")
+        .arg("-map").arg("0:a:0")
+        .arg("-map").arg("0:s?")
+        .arg("-c:s").arg("mov_text")
+        .arg("-movflags").arg("frag_keyframe+empty_moov+default_base_moof")
+        .arg("-f").arg("mp4")
+        .arg("pipe:1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| {
-            tracing::error!("Failed to run ffmpeg: {e}");
+            tracing::error!("Failed to spawn ffmpeg: {e}");
             ApiError::internal("ffmpeg not available — install ffmpeg to play MKV files")
         })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::error!("ffmpeg remux failed: {stderr}");
-            // Clean up partial file
-            let _ = std::fs::remove_file(&cached_path);
-            return Err(ApiError::internal("Failed to remux video"));
-        }
-
-        tracing::info!("Remux complete: {:?}", cached_path.file_name().unwrap());
+    // Log stderr in background
+    if let Some(stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::BufReader::new(stderr).read_to_string(&mut buf).ok();
+            if !buf.is_empty() {
+                tracing::warn!("ffmpeg: {buf}");
+            }
+        });
     }
 
-    // Serve the cached MP4 with full byte-range support (same as regular files)
-    let file_size = cached_path
-        .metadata()
-        .map(|m| m.len())
-        .map_err(|_| ApiError::internal("Remuxed file not found"))?;
+    let stdout = child.stdout.take()
+        .ok_or_else(|| ApiError::internal("Failed to capture ffmpeg output"))?;
 
-    let range = headers
-        .get(header::RANGE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| parse_range(s, file_size));
+    // Tee: read from ffmpeg, send to HTTP response AND write to cache file
+    let tmp_path = cache_dir.join(format!("{stem}.mp4.tmp"));
+    let cache_file = std::fs::File::create(&tmp_path).ok();
 
-    match range {
-        Some((start, end)) => {
-            let length = end - start + 1;
-            let mut file = tokio::fs::File::open(&cached_path)
-                .await
-                .map_err(|_| ApiError::internal("Failed to read remuxed file"))?;
-            file.seek(std::io::SeekFrom::Start(start))
-                .await
-                .map_err(|_| ApiError::internal("Failed to seek in remuxed file"))?;
-            let limited = file.take(length);
-            let stream = ReaderStream::new(limited);
-            let body = axum::body::Body::from_stream(stream);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(32);
 
-            Ok(Response::builder()
-                .status(StatusCode::PARTIAL_CONTENT)
-                .header(header::CONTENT_TYPE, "video/mp4")
-                .header(header::CONTENT_LENGTH, length.to_string())
-                .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{file_size}"))
-                .header(header::ACCEPT_RANGES, "bytes")
-                .body(body)
-                .unwrap())
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let mut stdout = stdout;
+        let mut cache = cache_file;
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            match stdout.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let chunk = buf[..n].to_vec();
+                    // Write to cache
+                    if let Some(ref mut f) = cache {
+                        let _ = f.write_all(&chunk);
+                    }
+                    // Send to HTTP response
+                    if tx.blocking_send(Ok(chunk)).is_err() {
+                        break; // client disconnected
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.blocking_send(Err(e));
+                    break;
+                }
+            }
         }
-        None => {
-            let file = tokio::fs::File::open(&cached_path)
-                .await
-                .map_err(|_| ApiError::internal("Failed to read remuxed file"))?;
-            let stream = ReaderStream::new(file);
-            let body = axum::body::Body::from_stream(stream);
-
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "video/mp4")
-                .header(header::CONTENT_LENGTH, file_size.to_string())
-                .header(header::ACCEPT_RANGES, "bytes")
-                .body(body)
-                .unwrap())
+        let _ = child.wait();
+        // Rename tmp to final cache path
+        if let Some(ref mut f) = cache {
+            let _ = f.flush();
         }
-    }
+        drop(cache);
+        let _ = std::fs::rename(&tmp_path, &cached_path);
+        tracing::info!("Remux cached: {:?}", cached_path.file_name().unwrap());
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    let body = axum::body::Body::from_stream(stream);
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "video/mp4")
+        .header(header::TRANSFER_ENCODING, "chunked")
+        .body(body)
+        .unwrap())
 }
 
 fn parse_range(range_header: &str, file_size: u64) -> Option<(u64, u64)> {

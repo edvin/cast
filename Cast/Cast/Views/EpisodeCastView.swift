@@ -4,7 +4,6 @@ struct EpisodeCastView: View {
     let episode: EpisodeItem
     let client: APIClient
 
-    @Environment(\.dismiss) private var dismiss
     @State private var credits: EpisodeCredits?
     @State private var isLoading = true
     @State private var error: CastError?
@@ -57,11 +56,6 @@ struct EpisodeCastView: View {
         }
         .navigationTitle("Cast & Crew")
         .background(Color.black.ignoresSafeArea())
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("Done") { dismiss() }
-            }
-        }
         .task { await loadCredits() }
     }
 

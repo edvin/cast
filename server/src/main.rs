@@ -74,11 +74,14 @@ async fn main() {
         let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
         tracing_subscriber::registry()
             .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
-            .with(tracing_subscriber::EnvFilter::new("info"))
+            .with(tracing_subscriber::EnvFilter::new("info,mdns_sd=warn"))
             .init();
         Some(guard)
     } else {
-        tracing_subscriber::fmt::init();
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_subscriber::EnvFilter::new("info,mdns_sd=warn"))
+            .init();
         None
     };
 

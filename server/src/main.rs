@@ -25,7 +25,7 @@ struct Args {
     port: u16,
 
     /// Server display name for Bonjour
-    #[arg(short = 'n', long, default_value = "Cast Server")]
+    #[arg(short = 'n', long, default_value = "Cast Server", env = "CAST_SERVER_NAME")]
     name: String,
 
     /// TMDB API key for fetching series metadata and artwork

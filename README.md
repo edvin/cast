@@ -1,6 +1,6 @@
 # Cast
 
-Stream your local TV series to Apple TV over the local network. A Rust media server indexes your library, fetches metadata from TMDB, and serves video with byte-range streaming. A tvOS app discovers the server via Bonjour, presents a premium browsing experience, and plays episodes with full transport controls and progress tracking.
+A local network media server and Apple TV client for streaming your video library. A Rust server indexes your media folders, fetches metadata and artwork from TMDB, and streams video with on-the-fly remuxing. A tvOS app discovers the server via Bonjour and provides a cinematic browsing and playback experience.
 
 ## Architecture
 
@@ -14,25 +14,30 @@ Stream your local TV series to Apple TV over the local network. A Rust media ser
 
 ## Media Library Setup
 
-Organize your media directory with one subfolder per series:
+Organize your media directory with one subfolder per show:
 
 ```
 media/
-├── Breaking Bad/
-│   ├── S01E01 Pilot.mp4
-│   ├── S01E02 Cat's in the Bag.mp4
+├── Planet Earth/
+│   ├── S01E01 From Pole to Pole.mp4
+│   ├── S01E02 Mountains.mkv
 │   └── ...
-├── The Wire/
-│   ├── 01x01 - The Target.mp4
+├── Cosmos/
+│   ├── 01x01 - Standing Up in the Milky Way.mp4
 │   └── ...
+└── The Joy of Painting/
+    ├── Episode 01 - A Walk in the Woods.mp4
+    └── ...
 ```
 
 **Episode naming** — these patterns are auto-parsed for season/episode numbers:
-- `S01E03 - Episode Title.mp4`
+- `S01E03 - Episode Title.mp4` (also works with scene-release names like `show.name.s01e03.720p.web.mkv`)
 - `01x03 - Title.mp4`
 - `Episode 03 - Title.mp4`
 - `03 - Title.mp4`
 - `03.mp4`
+
+**Video formats** — MP4/MOV files play natively. MKV, AVI, and WebM files are automatically remuxed to MP4 on first play (requires ffmpeg). The remuxed file is cached so subsequent plays are instant.
 
 **Subtitles** — external `.srt` files are detected alongside video files:
 - `S01E01.srt` — matches `S01E01.mp4`, defaults to English
@@ -40,9 +45,9 @@ media/
 - `S01E01.sv.srt` — Swedish subtitles
 - Multiple languages supported per episode
 
-Embedded subtitles in the video container also work automatically.
+Embedded subtitles in the video container (MKV/MP4) are preserved during remux and appear in the tvOS player's subtitle picker.
 
-**Artwork** — place any of these in a series folder and they'll be detected automatically:
+**Artwork** — place any of these in a show folder and they'll be detected automatically:
 - Poster: `poster.jpg`, `poster.png`, `folder.jpg`, `cover.jpg`
 - Backdrop: `backdrop.jpg`, `fanart.jpg`
 
@@ -64,11 +69,12 @@ Requires [Rust](https://rustup.rs/). The binary is at `server/target/release/cas
 Create `server/.env`:
 
 ```env
-CAST_MEDIA_PATH=/path/to/your/shows
+CAST_MEDIA_PATH=/path/to/your/media
 TMDB_API_KEY=your-tmdb-api-key
+CAST_SERVER_NAME=Living Room
 ```
 
-Get a free TMDB API key at [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api) (optional but recommended — provides series descriptions, episode info, and artwork).
+Get a free TMDB API key at [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api) (optional but recommended — provides descriptions, episode info, cast, and artwork).
 
 ### 3. Run
 
@@ -91,7 +97,7 @@ All options can be set via CLI flags, environment variables, or `.env` file:
 |------|---------|---------|-------------|
 | `--media` | `CAST_MEDIA_PATH` | *(required)* | Path to media directory |
 | `--port` | — | `3456` | HTTP port |
-| `--name` | — | `Cast Server` | Bonjour display name |
+| `--name` | `CAST_SERVER_NAME` | `Cast Server` | Bonjour display name |
 | `--tmdb-key` | `TMDB_API_KEY` | *(none)* | TMDB API key for metadata |
 | `--log-file` | — | `false` | Log to files instead of stdout |
 
@@ -99,38 +105,43 @@ All options can be set via CLI flags, environment variables, or `.env` file:
 
 When a TMDB API key is configured, the server automatically:
 
-- Searches TMDB by series folder name (cleans common tags like year, resolution, encoding)
+- Searches TMDB by folder name (cleans common tags like year, resolution, encoding)
 - Downloads poster and backdrop artwork
-- Fetches series info: title, overview, genres, rating, year
-- Fetches episode info: title, overview, air date, runtime
+- Fetches show info: title, overview, genres, rating, year
+- Fetches episode info: title, overview, air date, runtime, cast & guest stars
 
-**If auto-matching fails**, create a `tmdb.txt` file in the series folder containing just the TMDB ID:
+**If auto-matching fails**, create a `tmdb.txt` file in the show's folder containing just the TMDB ID:
 
 ```
 # Find the ID at https://www.themoviedb.org/tv/
-# e.g. Breaking Bad is https://www.themoviedb.org/tv/1396
-echo 1396 > "/path/to/media/Breaking Bad/tmdb.txt"
+echo 12345 > "/path/to/media/My Show/tmdb.txt"
 ```
 
-You can also trigger a metadata refresh anytime:
+You can also trigger a metadata refresh from the app (Refresh button) or via the API:
 
 ```bash
 curl -X POST http://localhost:3456/api/metadata/fetch
 ```
 
-## Optional Dependencies
+## Dependencies
 
-- **ffmpeg** — enables episode thumbnail generation (on-demand)
-- **ffprobe** — enables video duration detection
+- **ffmpeg** (recommended) — **required** for playing MKV/AVI/WebM files. The server remuxes these to MP4 on-the-fly so Apple TV can play them. Without ffmpeg, only native MP4/MOV files will play. Also enables episode thumbnail generation.
+- **ffprobe** — enables video duration detection (bundled with ffmpeg)
 
-Install via your package manager (`brew install ffmpeg`, `winget install ffmpeg`, etc.).
+Install via your package manager:
+
+| Platform | Command |
+|----------|---------|
+| macOS | `brew install ffmpeg` |
+| Windows | `winget install ffmpeg` or download from [gyan.dev/ffmpeg/builds](https://www.gyan.dev/ffmpeg/builds/) and add to PATH |
+| Linux | `apt install ffmpeg` / `dnf install ffmpeg` |
 
 ## Windows Deployment
 
 For running as a background service on Windows:
 
 ```powershell
-.\scripts\install-windows.ps1 -MediaPath "D:\Shows" -TmdbKey "your-key"
+.\scripts\install-windows.ps1 -MediaPath "D:\Media" -TmdbKey "your-key"
 ```
 
 This creates a Task Scheduler entry that auto-starts at login with file logging. Logs go to `<media-dir>\logs\`.
@@ -146,18 +157,19 @@ Start-ScheduledTask -TaskName CastServer
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/continue-watching` | In-progress series, sorted by recency |
-| GET | `/api/series` | All series with metadata and watch summary |
-| GET | `/api/series/{id}` | Series detail with episodes |
+| GET | `/api/continue-watching` | In-progress shows, sorted by recency |
+| GET | `/api/series` | All shows with metadata and watch summary |
+| GET | `/api/series/{id}` | Show detail with episodes |
 | GET | `/api/series/{id}/next` | Smart next episode recommendation |
-| GET | `/api/series/{id}/art` | Series poster image |
-| GET | `/api/series/{id}/backdrop` | Series backdrop image |
-| DELETE | `/api/series/{id}/progress` | Reset all watch progress for a series |
-| GET | `/api/episodes/{id}/stream` | Video stream (byte-range support) |
+| GET | `/api/series/{id}/art` | Poster image |
+| GET | `/api/series/{id}/backdrop` | Backdrop image |
+| DELETE | `/api/series/{id}/progress` | Reset all watch progress for a show |
+| GET | `/api/episodes/{id}/stream` | Video stream (byte-range, auto-remux) |
 | GET | `/api/episodes/{id}/thumbnail` | Episode thumbnail |
 | GET | `/api/episodes/{id}/progress` | Watch progress |
 | POST | `/api/episodes/{id}/progress` | Update watch progress |
 | DELETE | `/api/episodes/{id}/progress` | Mark episode as unwatched |
+| GET | `/api/episodes/{id}/credits` | Cast & guest stars (from TMDB, cached) |
 | GET | `/api/episodes/{id}/subtitles` | List available subtitle languages |
 | GET | `/api/episodes/{id}/subtitles/{lang}` | Subtitle file (SRT converted to WebVTT) |
 | POST | `/api/metadata/fetch` | Trigger TMDB metadata refresh |
@@ -169,16 +181,12 @@ All error responses return JSON: `{"error": "...", "code": 404, "detail": null}`
 ```bash
 # Run server in development
 cd server
-echo 'CAST_MEDIA_PATH=/path/to/shows' > .env
+echo 'CAST_MEDIA_PATH=/path/to/media' > .env
 echo 'TMDB_API_KEY=your-key' >> .env
 cargo run
 
 # Run tests
 cargo test
-
-# Lint
-cargo clippy -- -D warnings
-cargo fmt --all -- --check
 ```
 
 The tvOS app requires Xcode and an Apple Developer account. Build and deploy to your Apple TV over the same local network as the server.
@@ -197,13 +205,10 @@ cast/
 │   │   ├── media.rs     # ffprobe/ffmpeg integration
 │   │   └── mdns.rs      # Bonjour/mDNS advertisement
 │   └── Cargo.toml
-├── Cast/                 # tvOS SwiftUI app (Xcode project)
-├── scripts/             # Windows install/uninstall scripts
-├── APP_PLAN.md          # Detailed tvOS app implementation plan
-├── PLAN.md              # Architecture overview
-└── CLAUDE.md            # AI assistant context
+├── Cast/                # tvOS SwiftUI app (Xcode project)
+└── scripts/             # Windows install/uninstall scripts
 ```
 
 ## License
 
-Private project.
+MIT License. See [LICENSE](LICENSE) for details.

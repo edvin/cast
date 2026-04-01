@@ -86,6 +86,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/episodes/{episode_id}/subtitles/{language}", get(get_subtitle))
         .route("/api/series/{series_id}/progress", delete(delete_series_progress))
         .route("/api/metadata/fetch", post(fetch_metadata))
+        .route("/api/episodes/{episode_id}/credits", get(get_episode_credits))
         .with_state(state)
 }
 
@@ -133,6 +134,7 @@ struct EpisodeItem {
     air_date: Option<String>,
     runtime_minutes: Option<u32>,
     has_thumbnail: bool,
+    still_url: Option<String>,
     subtitle_languages: Vec<String>,
     progress: Option<EpisodeProgress>,
 }
@@ -157,6 +159,7 @@ struct ContinueWatchingItem {
     series_id: String,
     series_title: String,
     has_art: bool,
+    has_backdrop: bool,
     next_episode: EpisodeItem,
     reason: String,
 }
@@ -225,6 +228,7 @@ fn build_episode_item_cached(
         air_date: tmdb_meta.and_then(|m| m.air_date.clone()),
         runtime_minutes: tmdb_meta.and_then(|m| m.runtime_minutes),
         has_thumbnail,
+        still_url: tmdb_meta.and_then(|m| m.still_url.clone()),
         subtitle_languages: ep.subtitles.iter().map(|s| s.language.clone()).collect(),
         progress,
     }
@@ -437,6 +441,7 @@ async fn continue_watching(State(state): State<Arc<AppState>>) -> ApiResult<Json
                         series_id: series.id.clone(),
                         series_title,
                         has_art: series.art.is_some(),
+                        has_backdrop: series.backdrop.is_some(),
                         next_episode: item,
                         reason: "resume".to_string(),
                     },
@@ -468,6 +473,7 @@ async fn continue_watching(State(state): State<Arc<AppState>>) -> ApiResult<Json
                         series_id: series.id.clone(),
                         series_title,
                         has_art: series.art.is_some(),
+                        has_backdrop: series.backdrop.is_some(),
                         next_episode: build_episode_item_cached(
                             next_ep,
                             &series.id,
@@ -506,7 +512,16 @@ async fn get_series_art(State(state): State<Arc<AppState>>, Path(series_id): Pat
     Ok(([(header::CONTENT_TYPE, content_type)], data).into_response())
 }
 
-/// Stream a video file with byte-range support for seeking
+/// Check if a file needs remuxing (MKV → MP4) for Apple device compatibility
+fn needs_remux(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| matches!(e.to_lowercase().as_str(), "mkv" | "avi" | "webm" | "flv"))
+        .unwrap_or(false)
+}
+
+/// Stream a video file with byte-range support for seeking.
+/// MKV files are remuxed on-the-fly to fragmented MP4 via ffmpeg.
 async fn stream_episode(
     State(state): State<Arc<AppState>>,
     Path(episode_id): Path<String>,
@@ -521,6 +536,11 @@ async fn stream_episode(
         .metadata()
         .map(|m| m.len())
         .map_err(|_| ApiError::not_found("Video file not found"))?;
+
+    // MKV/AVI/WebM: remux to fragmented MP4 via ffmpeg (no re-encoding)
+    if needs_remux(&file_path) {
+        return stream_remuxed(file_path, headers, file_size).await;
+    }
 
     let content_type = mime_guess::from_path(&file_path).first_or_octet_stream().to_string();
 
@@ -562,6 +582,118 @@ async fn stream_episode(
             Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, content_type)
+                .header(header::CONTENT_LENGTH, file_size.to_string())
+                .header(header::ACCEPT_RANGES, "bytes")
+                .body(body)
+                .unwrap())
+        }
+    }
+}
+
+/// Remux a non-MP4 file to fragmented MP4 via ffmpeg, streamed to the client.
+/// Uses `-movflags frag_keyframe+empty_moov+faststart` so the MP4 is streamable
+/// without needing the full file written first.
+/// Remux a non-MP4 file to MP4 via ffmpeg, caching in .remux/ directory.
+/// Serves the cached file with full byte-range support for AVPlayer seeking.
+async fn stream_remuxed(
+    file_path: std::path::PathBuf,
+    headers: HeaderMap,
+    _file_size: u64,
+) -> ApiResult<Response> {
+    // Cache remuxed files alongside the .thumbnails dir
+    let cache_dir = file_path.parent().unwrap().join(".remux");
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    let stem = file_path.file_stem().unwrap_or_default().to_string_lossy();
+    let cached_path = cache_dir.join(format!("{stem}.mp4"));
+
+    // Remux if not already cached
+    if !cached_path.exists() {
+        tracing::info!("Remuxing {:?} → {:?}", file_path.file_name().unwrap(), cached_path.file_name().unwrap());
+
+        let output = tokio::task::spawn_blocking({
+            let file_path = file_path.clone();
+            let cached_path = cached_path.clone();
+            move || {
+                std::process::Command::new("ffmpeg")
+                    .arg("-hide_banner")
+                    .arg("-loglevel").arg("warning")
+                    .arg("-i").arg(&file_path)
+                    .arg("-c:v").arg("copy")
+                    .arg("-c:a").arg("aac")
+                    .arg("-b:a").arg("192k")
+                    .arg("-ac").arg("2")
+                    .arg("-map").arg("0:v:0")
+                    .arg("-map").arg("0:a:0")
+                    .arg("-map").arg("0:s?")          // include all subtitle streams
+                    .arg("-c:s").arg("mov_text")       // convert subs to MP4-compatible format
+                    .arg("-movflags").arg("+faststart")
+                    .arg("-y")
+                    .arg(&cached_path)
+                    .output()
+            }
+        })
+        .await
+        .map_err(|_| ApiError::internal("Remux task failed"))?
+        .map_err(|e| {
+            tracing::error!("Failed to run ffmpeg: {e}");
+            ApiError::internal("ffmpeg not available — install ffmpeg to play MKV files")
+        })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::error!("ffmpeg remux failed: {stderr}");
+            // Clean up partial file
+            let _ = std::fs::remove_file(&cached_path);
+            return Err(ApiError::internal("Failed to remux video"));
+        }
+
+        tracing::info!("Remux complete: {:?}", cached_path.file_name().unwrap());
+    }
+
+    // Serve the cached MP4 with full byte-range support (same as regular files)
+    let file_size = cached_path
+        .metadata()
+        .map(|m| m.len())
+        .map_err(|_| ApiError::internal("Remuxed file not found"))?;
+
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| parse_range(s, file_size));
+
+    match range {
+        Some((start, end)) => {
+            let length = end - start + 1;
+            let mut file = tokio::fs::File::open(&cached_path)
+                .await
+                .map_err(|_| ApiError::internal("Failed to read remuxed file"))?;
+            file.seek(std::io::SeekFrom::Start(start))
+                .await
+                .map_err(|_| ApiError::internal("Failed to seek in remuxed file"))?;
+            let limited = file.take(length);
+            let stream = ReaderStream::new(limited);
+            let body = axum::body::Body::from_stream(stream);
+
+            Ok(Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header(header::CONTENT_TYPE, "video/mp4")
+                .header(header::CONTENT_LENGTH, length.to_string())
+                .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{file_size}"))
+                .header(header::ACCEPT_RANGES, "bytes")
+                .body(body)
+                .unwrap())
+        }
+        None => {
+            let file = tokio::fs::File::open(&cached_path)
+                .await
+                .map_err(|_| ApiError::internal("Failed to read remuxed file"))?;
+            let stream = ReaderStream::new(file);
+            let body = axum::body::Body::from_stream(stream);
+
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "video/mp4")
                 .header(header::CONTENT_LENGTH, file_size.to_string())
                 .header(header::ACCEPT_RANGES, "bytes")
                 .body(body)
@@ -823,6 +955,59 @@ async fn fetch_metadata(State(state): State<Arc<AppState>>) -> ApiResult<Json<Fe
         downloaded,
         message: format!("Processed {total} series, downloaded art for {downloaded}"),
     }))
+}
+
+/// Get cast/guest stars for an episode (cached in DB, fetched from TMDB on first request)
+async fn get_episode_credits(
+    State(state): State<Arc<AppState>>,
+    Path(episode_id): Path<String>,
+) -> ApiResult<Json<crate::tmdb::EpisodeCredits>> {
+    let tmdb_client = state.tmdb.as_ref().ok_or_else(|| {
+        ApiError::unavailable("TMDB API key not configured")
+    })?;
+
+    // Find the episode and its series
+    let (series_id, season, episode) = {
+        let lib = state.library.read().await;
+        let (series, ep) = lib
+            .find_episode(&episode_id)
+            .ok_or_else(|| ApiError::not_found("Episode not found"))?;
+
+        let season = ep.season_number.ok_or_else(|| {
+            ApiError::not_found("Episode has no season/episode number — cannot look up credits")
+        })?;
+        let episode = ep.episode_number.ok_or_else(|| {
+            ApiError::not_found("Episode has no episode number — cannot look up credits")
+        })?;
+        (series.id.clone(), season, episode)
+    };
+
+    // Check cache first
+    if let Some(cached_json) = state.db.get_episode_credits(&series_id, season, episode) {
+        let credits: crate::tmdb::EpisodeCredits =
+            serde_json::from_str(&cached_json).map_err(|_| ApiError::internal("Corrupt credits cache"))?;
+        return Ok(Json(credits));
+    }
+
+    // Need TMDB ID for the series
+    let tmdb_id = state
+        .db
+        .get_series_metadata(&series_id)
+        .and_then(|m| m.tmdb_id)
+        .ok_or_else(|| ApiError::not_found("No TMDB metadata for this series"))?;
+
+    // Fetch from TMDB
+    let credits = tmdb_client
+        .get_episode_credits(tmdb_id, season, episode)
+        .await
+        .map_err(|e| ApiError::internal(&format!("TMDB request failed: {e}")))?;
+
+    // Cache in DB
+    if let Ok(json) = serde_json::to_string(&credits) {
+        let _ = state.db.save_episode_credits(&series_id, season, episode, &json);
+    }
+
+    Ok(Json(credits))
 }
 
 #[cfg(test)]

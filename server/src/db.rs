@@ -79,6 +79,15 @@ impl Database {
                 still_url TEXT,
                 updated_at TEXT NOT NULL DEFAULT (datetime('now')),
                 PRIMARY KEY (series_id, season_number, episode_number)
+            );
+
+            CREATE TABLE IF NOT EXISTS episode_credits (
+                series_id TEXT NOT NULL,
+                season_number INTEGER NOT NULL,
+                episode_number INTEGER NOT NULL,
+                credits_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (series_id, season_number, episode_number)
             );",
         )?;
 
@@ -423,6 +432,35 @@ impl Database {
         .unwrap()
         .filter_map(|r| r.ok())
         .collect()
+    }
+
+    pub fn get_episode_credits(&self, series_id: &str, season: u32, episode: u32) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT credits_json FROM episode_credits
+             WHERE series_id = ?1 AND season_number = ?2 AND episode_number = ?3",
+            params![series_id, season as i64, episode as i64],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+
+    pub fn save_episode_credits(
+        &self,
+        series_id: &str,
+        season: u32,
+        episode: u32,
+        credits_json: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO episode_credits (series_id, season_number, episode_number, credits_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, datetime('now'))
+             ON CONFLICT(series_id, season_number, episode_number) DO UPDATE SET
+                credits_json = ?4, updated_at = datetime('now')",
+            params![series_id, season as i64, episode as i64, credits_json],
+        )?;
+        Ok(())
     }
 }
 

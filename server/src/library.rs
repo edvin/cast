@@ -92,12 +92,42 @@ fn clean_title(raw: &str) -> String {
     let s = s.trim();
     // Strip a leading " - " or "- " or " -" separator
     let s = s.strip_prefix("- ").or_else(|| s.strip_prefix('-')).unwrap_or(s);
-    s.trim().to_string()
+    let s = s.trim();
+    // Strip common scene-release tags (resolution, codec, source, group)
+    strip_release_tags(s)
 }
 
-static RE_SXXEXX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^S(\d+)E(\d+)[\s.\-]*(.*)$").unwrap());
-static RE_NNXNN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^(\d+)x(\d+)[\s.\-]*(.*)$").unwrap());
-static RE_EPISODE_WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^Episode\s+(\d+)[\s.\-]*(.*)$").unwrap());
+/// Remove common scene-release tags like 720p, 1080p, WEB, H264, x265, group names, etc.
+fn strip_release_tags(s: &str) -> String {
+    static RE_TAGS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)\b(720p|1080p|2160p|4k|web|webrip|web-dl|hdtv|bluray|bdrip|dvdrip|h\.?264|h\.?265|x\.?264|x\.?265|aac|hevc|10bit|hdr|remux)\b").unwrap()
+    });
+    // Strip from the first recognized tag onward
+    if let Some(m) = RE_TAGS.find(s) {
+        let before = s[..m.start()].trim();
+        // Also strip trailing dash and group name (e.g. "-SYLIX")
+        let before = before.trim_end_matches(|c: char| c == '-' || c == '.' || c == ' ');
+        return before.to_string(); // may be empty — caller handles that
+    }
+    // Strip trailing group tag like "-SYLIX" if present
+    if let Some(idx) = s.rfind('-') {
+        let after = &s[idx + 1..];
+        if !after.is_empty() && after.chars().all(|c| c.is_ascii_alphanumeric()) && after.len() <= 12 {
+            let before = s[..idx].trim();
+            if !before.is_empty() {
+                return before.to_string();
+            }
+        }
+    }
+    s.to_string()
+}
+
+// Matches S01E03 anywhere in string (scene releases have show name prefix)
+static RE_SXXEXX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)[Ss](\d+)[Ee](\d+)[\s.\-]*(.*)$").unwrap());
+static RE_NNXNN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(?:^|[\s.])(\d+)x(\d+)[\s.\-]*(.*)$").unwrap());
+// Compact 4-digit SSEE format: e.g. "0201" = S02E01, bounded by non-digits
+static RE_COMPACT_SSEE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:^|[.\-\s])(\d{2})(\d{2})(?:[.\-\s]|$)").unwrap());
+static RE_EPISODE_WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(?:^|[\s.])Episode\s+(\d+)[\s.\-]*(.*)$").unwrap());
 static RE_BARE_NUM_TITLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+)[\s.\-]+(.+)$").unwrap());
 static RE_BARE_NUM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+)$").unwrap());
 
@@ -138,6 +168,20 @@ pub fn parse_episode_filename(filename: &str) -> ParsedEpisodeInfo {
                 title
             },
         };
+    }
+
+    // Compact 4-digit SSEE: "0201" = S02E01 (common in scene releases like afo-show-0201-720)
+    // Only match if season 01-30 and episode 01-99 to avoid false positives on years/resolutions
+    if let Some(caps) = RE_COMPACT_SSEE.captures(stem) {
+        let season: u32 = caps[1].parse().unwrap();
+        let episode: u32 = caps[2].parse().unwrap();
+        if season >= 1 && season <= 30 && episode >= 1 {
+            return ParsedEpisodeInfo {
+                season: Some(season),
+                episode: Some(episode),
+                title: format!("Episode {episode}"),
+            };
+        }
     }
 
     // Episode 03 - Title
@@ -714,6 +758,45 @@ mod tests {
         assert_eq!(info.season, Some(2));
         assert_eq!(info.episode, Some(7));
         assert_eq!(info.title, "Episode 7");
+    }
+
+    #[test]
+    fn parse_scene_release_sxxexx() {
+        let info = parse_episode_filename("will trent s04e13 720p web h264-sylix.mkv");
+        assert_eq!(info.season, Some(4));
+        assert_eq!(info.episode, Some(13));
+        // Title stripped of release tags
+        assert_eq!(info.title, "Episode 13");
+    }
+
+    #[test]
+    fn parse_scene_release_prefix_sxxexx() {
+        let info = parse_episode_filename("Show.Name.S02E05.Episode.Title.720p.WEB.x264.mkv");
+        assert_eq!(info.season, Some(2));
+        assert_eq!(info.episode, Some(5));
+        assert_eq!(info.title, "Episode Title");
+    }
+
+    #[test]
+    fn parse_scene_release_dashed() {
+        let info = parse_episode_filename("afo-ddbornagain-s02e01-720-web.mkv");
+        assert_eq!(info.season, Some(2));
+        assert_eq!(info.episode, Some(1));
+    }
+
+    #[test]
+    fn parse_compact_ssee_format() {
+        let info = parse_episode_filename("afo-ddbornagain-0201-720-web.mkv");
+        assert_eq!(info.season, Some(2));
+        assert_eq!(info.episode, Some(1));
+        assert_eq!(info.title, "Episode 1");
+    }
+
+    #[test]
+    fn parse_compact_ssee_higher_numbers() {
+        let info = parse_episode_filename("show-0412-720p.mkv");
+        assert_eq!(info.season, Some(4));
+        assert_eq!(info.episode, Some(12));
     }
 
     #[test]

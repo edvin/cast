@@ -101,6 +101,37 @@ pub struct EpisodeInfo {
     pub still_url: Option<String>,
 }
 
+// --- Episode credits types ---
+
+#[derive(Debug, Deserialize)]
+struct TmdbCreditsResponse {
+    cast: Option<Vec<TmdbCastMember>>,
+    guest_stars: Option<Vec<TmdbCastMember>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TmdbCastMember {
+    name: String,
+    character: Option<String>,
+    profile_path: Option<String>,
+    order: Option<u32>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CastMember {
+    pub name: String,
+    pub character: Option<String>,
+    pub profile_url: Option<String>,
+    pub order: u32,
+    pub is_guest: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EpisodeCredits {
+    pub cast: Vec<CastMember>,
+    pub guest_stars: Vec<CastMember>,
+}
+
 impl TmdbClient {
     pub fn new(api_key: String) -> Self {
         TmdbClient {
@@ -211,6 +242,62 @@ impl TmdbClient {
                 still_url: ep.still_path.map(|p| format!("{TMDB_IMAGE_BASE}/w300{p}")),
             })
             .collect())
+    }
+
+    /// Get cast and guest stars for a specific episode
+    pub async fn get_episode_credits(
+        &self,
+        tmdb_id: u64,
+        season_number: u32,
+        episode_number: u32,
+    ) -> Result<EpisodeCredits, reqwest::Error> {
+        let resp = self
+            .http
+            .get(format!(
+                "{TMDB_BASE}/tv/{tmdb_id}/season/{season_number}/episode/{episode_number}/credits"
+            ))
+            .query(&[("api_key", &self.api_key)])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Ok(EpisodeCredits {
+                cast: vec![],
+                guest_stars: vec![],
+            });
+        }
+
+        let credits: TmdbCreditsResponse = resp.json().await?;
+
+        let cast = credits
+            .cast
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(i, c)| CastMember {
+                name: c.name,
+                character: c.character,
+                profile_url: c.profile_path.map(|p| format!("{TMDB_IMAGE_BASE}/w185{p}")),
+                order: c.order.unwrap_or(i as u32),
+                is_guest: false,
+            })
+            .collect();
+
+        let guest_stars = credits
+            .guest_stars
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(i, c)| CastMember {
+                name: c.name,
+                character: c.character,
+                profile_url: c.profile_path.map(|p| format!("{TMDB_IMAGE_BASE}/w185{p}")),
+                order: c.order.unwrap_or(i as u32),
+                is_guest: true,
+            })
+            .collect();
+
+        Ok(EpisodeCredits { cast, guest_stars })
     }
 
     /// Download an image from a URL and save it to a path

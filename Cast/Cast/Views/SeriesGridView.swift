@@ -72,8 +72,8 @@ struct SeriesGridView: View {
 
                     ScrollView {
                         VStack(alignment: .leading, spacing: 60) {
-                            // Top bar with refresh button
-                            HStack {
+                            // Top bar
+                            HStack(spacing: 24) {
                                 Spacer()
                                 Button {
                                     Task { await refreshMetadata() }
@@ -94,6 +94,20 @@ struct SeriesGridView: View {
                                 }
                                 .buttonStyle(NoChromeFocusButtonStyle())
                                 .disabled(isRefreshing)
+
+                                Button {
+                                    connection.disconnect()
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "server.rack")
+                                        Text("Change Server")
+                                            .font(.caption)
+                                    }
+                                    .foregroundStyle(Color(white: 0.6))
+                                    .padding(.horizontal, 20)
+                                    .padding(.vertical, 10)
+                                }
+                                .buttonStyle(NoChromeFocusButtonStyle())
                             }
                             .padding(.horizontal, 80)
 

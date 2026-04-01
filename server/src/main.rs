@@ -24,8 +24,8 @@ struct Args {
     #[arg(short, long, default_value = "3456")]
     port: u16,
 
-    /// Server display name for Bonjour
-    #[arg(short = 'n', long, default_value = "Cast Server", env = "CAST_SERVER_NAME")]
+    /// Server display name for Bonjour [env: CAST_SERVER_NAME]
+    #[arg(short = 'n', long, default_value = "Cast Server", env = "CAST_SERVER_NAME", hide_default_value = true)]
     name: String,
 
     /// TMDB API key for fetching series metadata and artwork
@@ -47,7 +47,14 @@ pub struct AppState {
 #[tokio::main]
 async fn main() {
     // Load .env file if present (before clap parses, so env vars are available)
-    dotenvy::dotenv().ok();
+    // Try current directory first, then next to the executable
+    if dotenvy::dotenv().is_err() {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let _ = dotenvy::from_path(dir.join(".env"));
+            }
+        }
+    }
 
     let args = Args::parse();
 

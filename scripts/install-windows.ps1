@@ -92,7 +92,7 @@ Write-Host "  Executable:  $serverExe"
 Write-Host "  Media Path:  $MediaPath"
 Write-Host "  Port:        $Port"
 if ($ServerName) { Write-Host "  Name:        $ServerName" }
-Write-Host "  Logs:        $MediaPath\logs\"
+Write-Host "  Logs:        $MediaPath\logs"
 Write-Host ""
 Write-Host "Starting server now..."
 

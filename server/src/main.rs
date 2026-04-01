@@ -16,7 +16,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 #[command(name = "cast-server", about = "Cast — local network video server")]
 struct Args {
     /// Path to the media directory (series as subfolders)
-    #[arg(short, long)]
+    #[arg(short, long, env = "CAST_MEDIA_PATH")]
     media: PathBuf,
 
     /// Port to listen on

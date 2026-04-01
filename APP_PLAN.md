@@ -2,6 +2,75 @@
 
 This document contains everything needed to build the Cast tvOS app from scratch. The app discovers a Cast media server on the local network via Bonjour, displays a series library with poster art, and plays video episodes with progress tracking.
 
+**IMPORTANT: The UI must be visually stunning — on par with Apple TV+, Infuse, and Netflix.** tvOS users expect premium, cinematic presentation. Every design decision should prioritize visual impact.
+
+---
+
+## 0. Visual Design Philosophy
+
+The Cast app should feel like a premium streaming experience. These principles apply to every view:
+
+### Color & Theme
+- **Dark background** throughout — use `Color.black` or very dark grays (#111, #1a1a1a) as base
+- **No bright backgrounds** — content (posters, backdrops) should be the color, not the UI chrome
+- **White/light text** with `.secondary` for subtitles and metadata
+- **Accent color** for progress bars, focused states, and interactive elements — a warm amber/gold or cool blue
+
+### Typography
+- Use **SF Pro** (system font) with large sizes — this is a 10-foot UI
+- Series titles: `.title` or `.title2` weight `.bold`
+- Episode titles: `.headline`
+- Metadata (year, genres, runtime): `.subheadline` in `.secondary` color
+- Overview text: `.body` in `.secondary` color, limit to 3-4 lines with `lineLimit`
+
+### Image Presentation
+- **Posters**: 2:3 aspect ratio, rounded corners (12-16pt), subtle shadow on focus
+- **Backdrops**: Full-width hero images with gradient overlays fading to black at the bottom
+- **Thumbnails**: 16:9 aspect ratio for episode stills
+- **Missing art**: Use a styled placeholder with the series initial letter on a gradient background, never show a broken image or empty space
+
+### Focus & Animation
+- **`.buttonStyle(.card)`** on all grid cells — gives the signature tvOS lift, scale, and shadow on focus
+- **Parallax effect** on poster images: use `MorphStyle` or the card button style's built-in parallax
+- Focused cells should **scale up ~1.05x** with a **soft shadow** underneath
+- Transitions between views should feel smooth — use `NavigationStack` with standard tvOS push animations
+
+### Layout Patterns
+- **Horizontal shelves** (like Netflix/Apple TV+): rows of horizontally scrolling content, each row is a category
+  - Row 1: "Continue Watching" — wider landscape cards with backdrop + episode info overlay
+  - Row 2+: "All Series" — portrait poster grid
+- **Full-screen hero** on the Series Detail screen: backdrop image fills the top half with a gradient overlay, series info overlaid on top
+- **Generous padding**: tvOS safe area is already large; add extra padding (40-60pt) for breathing room
+
+### Continue Watching Cards
+These should be the most visually striking element on the home screen:
+- **Landscape aspect ratio** (16:9 or wider)
+- Show the series **backdrop** (not poster) as the card image
+- Overlay at bottom: series title, episode label (S1 E3), progress bar
+- **Progress bar**: thin, colored bar at the very bottom of the card showing watch percentage
+- On focus: lift + scale with parallax on the backdrop image
+
+### Series Detail — Hero Layout
+When you enter a series, the top of the screen should be cinematic:
+- **Full-width backdrop** (if available) covering the top ~40% of the screen
+- **Gradient overlay**: transparent at top → solid black at bottom, so text is readable
+- Series **poster** (small, ~150pt wide) positioned on the left
+- To the right of the poster: title (large, bold), year, genres, rating (star icon), overview (3-4 lines)
+- Below the hero: "Continue Watching" button (prominent) and episode list
+
+### Episode List
+- Each row: thumbnail (if available, 16:9, ~200pt wide), episode label (S1 E3), title, runtime, air date
+- **Watch status indicators**:
+  - Unwatched: no indicator
+  - In progress: small progress bar under the thumbnail
+  - Watched: checkmark overlay or dimmed appearance
+- On focus: row highlights with standard tvOS list focus style
+
+### Progress Bars
+- Thin (3-4pt), rounded caps
+- Use accent color for the filled portion, dark gray for the track
+- Appear on Continue Watching cards and in-progress episode rows
+
 ---
 
 ## 1. Project Setup
@@ -765,54 +834,92 @@ struct ServerDiscoveryView: View {
 
 ### 9.2 SeriesGridView — `Views/SeriesGridView.swift`
 
-**Purpose:** Main browsing screen. Shows a grid of all series with poster art and watch progress.
+**Purpose:** Main home screen. Uses a Netflix/Apple TV+ style layout with horizontal shelves.
 
-**Layout:**
-```
-╔══════════════════════════════════════════════════════════╗
-║  Cast                                          ⚙ Server ║
-║                                                          ║
-║  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐   ║
-║  │         │  │         │  │         │  │         │   ║
-║  │  poster │  │  poster │  │  poster │  │  poster │   ║
-║  │         │  │         │  │         │  │         │   ║
-║  ├─────────┤  ├─────────┤  ├─────────┤  ├─────────┤   ║
-║  │Breaking │  │The Wire │  │Sopranos │  │  Lost   │   ║
-║  │  Bad    │  │         │  │         │  │         │   ║
-║  │ 3/62 ✓  │  │ 0/60    │  │12/86 ✓  │  │ 0/121   │   ║
-║  └─────────┘  └─────────┘  └─────────┘  └─────────┘   ║
-║                                                          ║
-║  ┌─────────┐  ┌─────────┐                               ║
-║  │         │  │         │                               ║
-║  │  poster │  │  poster │                               ║
-║  ...                                                     ║
-╚══════════════════════════════════════════════════════════╝
-```
+**Layout — two sections stacked vertically in a ScrollView:**
+
+1. **"Continue Watching" shelf** (only if data exists from `/api/continue-watching`)
+   - Section header: "Continue Watching" in `.title3.bold()`
+   - Horizontal `ScrollView(.horizontal)` with landscape cards
+   - Each card: 400pt wide x 225pt tall (16:9), shows series backdrop image
+   - Bottom overlay (gradient from transparent to black): series title, episode label, thin progress bar
+   - `.buttonStyle(.card)` for focus lift + parallax on the backdrop
+   - Selecting a card jumps straight to the player (resume/play next episode)
+
+2. **"All Series" poster grid**
+   - Section header: "Library" in `.title3.bold()`
+   - `LazyVGrid` with 2:3 portrait poster cards
+   - Each cell: poster image with rounded corners (12pt), series title below
+   - Subtitle: year + genres (e.g. "2008 · Drama, Thriller") in `.caption.secondary`
+   - If no poster (`hasArt == false`): styled placeholder — dark gradient with large first letter of series name, centered
+   - `.buttonStyle(.card)` on each `NavigationLink` for lift/scale/shadow/parallax
 
 **Behavior:**
-- On appear: fetch `GET /api/series` via `APIClient.listSeries()`.
-- Display as `LazyVGrid` with adaptive columns (minimum width ~220pt for tvOS).
-- Each cell is a `NavigationLink` to `SeriesDetailView`.
-- Poster images loaded with `AsyncImage(url: client.artURL(seriesId:))`.
-- If `hasArt` is false, show a placeholder (gray rectangle with series title initials or a TV icon).
-- Below the poster: series title (1-2 lines, `.title3` font) and "3/62 watched" subtitle (`.caption`, secondary color).
-- Pull to refresh or re-fetch on appear to pick up server-side changes.
+- On appear: fetch both `GET /api/continue-watching` and `GET /api/series` concurrently
+- Re-fetch on appear (to pick up progress changes after watching)
+- Smooth loading: show content as it arrives, don't block on both
 
-**Focus behavior:**
-- tvOS focus engine automatically handles grid cell focus.
-- When a cell gains focus, it should scale up slightly. Use the `.buttonStyle(.card)` style on each `NavigationLink`, which gives the standard tvOS lift/scale animation for free.
-- If `.card` style is not sufficient, wrap each cell in a `Button` and apply `.hoverEffect(.lift)`.
+**Continue Watching card implementation:**
+```swift
+ZStack(alignment: .bottomLeading) {
+    // Backdrop image fills the card
+    AsyncImage(url: client.artURL(seriesId: item.seriesId)) { image in
+        image.resizable().aspectRatio(contentMode: .fill)
+    } placeholder: {
+        Rectangle().fill(Color.gray.opacity(0.3))
+    }
+    .frame(width: 400, height: 225)
+    .clipped()
+
+    // Gradient overlay at bottom
+    VStack(alignment: .leading, spacing: 4) {
+        Spacer()
+        LinearGradient(colors: [.clear, .black.opacity(0.9)], startPoint: .top, endPoint: .bottom)
+            .frame(height: 100)
+            .overlay(alignment: .bottomLeading) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(item.seriesTitle).font(.headline).bold()
+                    Text(item.nextEpisode.episodeLabel).font(.subheadline).foregroundColor(.secondary)
+                    // Progress bar
+                    if let progress = item.nextEpisode.progress {
+                        ProgressView(value: progress.fraction)
+                            .tint(.accentColor)
+                            .frame(height: 3)
+                    }
+                }
+                .padding(16)
+            }
+    }
+}
+.frame(width: 400, height: 225)
+.clipShape(RoundedRectangle(cornerRadius: 12))
+```
+
+**Poster placeholder for series without art:**
+```swift
+ZStack {
+    LinearGradient(
+        colors: [Color.blue.opacity(0.6), Color.purple.opacity(0.4)],
+        startPoint: .topLeading, endPoint: .bottomTrailing
+    )
+    Text(String(series.title.prefix(1)))
+        .font(.system(size: 80, weight: .bold))
+        .foregroundColor(.white.opacity(0.8))
+}
+.aspectRatio(2/3, contentMode: .fit)
+.clipShape(RoundedRectangle(cornerRadius: 12))
+```
 
 **Grid configuration:**
 ```swift
 let columns = [
-    GridItem(.adaptive(minimum: 220, maximum: 300), spacing: 48)
+    GridItem(.adaptive(minimum: 220, maximum: 280), spacing: 48)
 ]
 ```
 
 **Error states:**
-- Loading: show `ProgressView`.
-- Empty library: "No series found. Add media folders to your Cast server."
+- Loading: show `ProgressView` centered
+- Empty library: Styled message with icon — "No series found. Add media folders to your Cast server."
 - Network error: "Could not connect to server" with a Retry button.
 
 **Implementation outline:**
@@ -937,51 +1044,131 @@ struct SeriesCell: View {
 
 ### 9.3 SeriesDetailView — `Views/SeriesDetailView.swift`
 
-**Purpose:** Shows episodes for a series with a prominent "continue watching" action and an episode list.
+**Purpose:** Cinematic series detail page with hero backdrop, series info, and episode list.
 
-**Layout:**
+**Layout — Full-screen cinematic design:**
+
+The view is a vertical `ScrollView` with two major sections:
+
+**1. Hero Section (top ~40% of screen)**
 ```
 ╔══════════════════════════════════════════════════════════╗
-║  ← Breaking Bad                                         ║
 ║                                                          ║
-║  ┌──────────────────────────────────────────────────┐   ║
-║  │  ▶ Continue watching: S01E04 Cancer Man          │   ║  ← Big focused button
-║  │    Resume at 23:45                               │   ║
-║  └──────────────────────────────────────────────────┘   ║
+║           [FULL-WIDTH BACKDROP IMAGE]                    ║
+║           with gradient overlay fading to black          ║
 ║                                                          ║
-║  Episodes                                                ║
-║  ┌──────────────────────────────────────────────────┐   ║
-║  │ 1. S01E01 Pilot                          ✓      │   ║
-║  ├──────────────────────────────────────────────────┤   ║
-║  │ 2. S01E02 Cat's in the Bag              ✓      │   ║
-║  ├──────────────────────────────────────────────────┤   ║
-║  │ 3. S01E03 And the Bag's in the River    ✓      │   ║
-║  ├──────────────────────────────────────────────────┤   ║
-║  │ 4. S01E04 Cancer Man                    ◐ 23:45│   ║  ← In-progress
-║  ├──────────────────────────────────────────────────┤   ║
-║  │ 5. S01E05 Gray Matter                    ○      │   ║  ← Unwatched
-║  └──────────────────────────────────────────────────┘   ║
+║  ┌──────┐                                                ║
+║  │poster│  Breaking Bad                                  ║
+║  │      │  2008 · Drama, Thriller · ★ 8.9               ║
+║  │      │                                                ║
+║  └──────┘  A chemistry teacher diagnosed with terminal   ║
+║            lung cancer teams up with a former student...  ║
+║                                                          ║
+║  [▶ Continue S01E04 "Cancer Man" at 23:45]              ║
+║                                                          ║
 ╚══════════════════════════════════════════════════════════╝
 ```
 
+Implementation:
+- `AsyncImage` for the backdrop, filling full width, ~400pt tall
+- `LinearGradient` overlay from `.clear` to `.black` from top 40% to bottom
+- Series poster (small, ~120pt wide, 2:3) positioned bottom-left of the hero
+- Series info to the right of the poster:
+  - Title: `.title.bold()`
+  - Metadata line: year, genres, rating with star icon — `.subheadline.secondary`
+  - Overview: `.body.secondary`, `lineLimit(3)`
+- Continue watching button below the info, styled prominently with `.borderedProminent`
+- If no backdrop available, use a dark gradient with the poster enlarged as background (blurred)
+
+**Hero backdrop with gradient:**
+```swift
+ZStack(alignment: .bottomLeading) {
+    // Backdrop
+    AsyncImage(url: client.backdropURL(seriesId: detail.id)) { image in
+        image.resizable().aspectRatio(contentMode: .fill)
+    } placeholder: {
+        Rectangle().fill(Color(white: 0.1))
+    }
+    .frame(height: 400)
+    .clipped()
+
+    // Gradient overlay
+    LinearGradient(
+        stops: [
+            .init(color: .clear, location: 0.3),
+            .init(color: .black, location: 1.0)
+        ],
+        startPoint: .top, endPoint: .bottom
+    )
+
+    // Series info overlay
+    HStack(alignment: .bottom, spacing: 24) {
+        // Small poster
+        AsyncImage(url: client.artURL(seriesId: detail.id)) { image in
+            image.resizable().aspectRatio(2/3, contentMode: .fit)
+        } placeholder: { Color.gray.opacity(0.3) }
+        .frame(width: 120)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .shadow(radius: 10)
+
+        VStack(alignment: .leading, spacing: 8) {
+            Text(detail.title).font(.title).bold()
+            HStack(spacing: 12) {
+                if let year = detail.year { Text(year) }
+                if let genres = detail.genres { Text(genres) }
+                if let rating = detail.rating {
+                    Label(String(format: "%.1f", rating), systemImage: "star.fill")
+                }
+            }
+            .font(.subheadline).foregroundColor(.secondary)
+
+            if let overview = detail.overview {
+                Text(overview)
+                    .font(.body).foregroundColor(.secondary)
+                    .lineLimit(3)
+                    .frame(maxWidth: 600, alignment: .leading)
+            }
+        }
+    }
+    .padding(48)
+}
+```
+
+**2. Episode List (below hero)**
+
+Each episode row is visually rich:
+```
+┌─────────────┬────────────────────────────────────────────────┐
+│  thumbnail  │  S1 E4 · "Cancer Man"                         │
+│  (16:9)     │  A dangerous situation leads Walt to...         │
+│  [progress] │  42 min · Oct 2, 2008                    ◐    │
+└─────────────┴────────────────────────────────────────────────┘
+```
+
+- Episode thumbnail (200pt wide, 16:9) on the left via `AsyncImage(url: client.thumbnailURL(episodeId:))`
+- If `hasThumbnail == false`, show placeholder with episode number
+- In-progress episodes: thin progress bar overlaid at the bottom of the thumbnail
+- Right side: episode label (`.headline`), title, overview (1 line), runtime + air date (`.caption.secondary`)
+- Watch status on the far right:
+  - Completed: `Image(systemName: "checkmark.circle.fill").foregroundColor(.green)`
+  - In-progress: `Image(systemName: "play.circle.fill").foregroundColor(.accentColor)`
+  - Unwatched: no icon (clean)
+
+**Continue watching button:**
+- If reason is `"resume"`: "Continue S01E04 'Cancer Man' at 23:45"
+- If reason is `"next"`: "Play S01E05 'Gray Matter'"
+- If reason is `"first"`: "Start Watching"
+- If reason is `"all_watched"`: "Rewatch from Beginning" (dimmed style)
+- Uses `.buttonStyle(.borderedProminent)` with large size
+
+**Context menu on episodes (long-press on Siri Remote):**
+- "Mark as Unwatched" → calls `DELETE /api/episodes/{id}/progress`
+- "Reset Series" → calls `DELETE /api/series/{id}/progress`
+
 **Behavior:**
-- On appear: fetch both `GET /api/series/{id}` (for episode list) and `GET /api/series/{id}/next` (for smart recommendation) concurrently.
-- **Continue button** at top:
-  - If reason is `"resume"`: "Continue watching: {episode.title} — Resume at {MM:SS}" (format `position_secs` as `MM:SS`).
-  - If reason is `"next"`: "Start next: {episode.title}".
-  - If reason is `"first"`: "Start watching: {episode.title}".
-  - If reason is `"all_watched"`: "All episodes watched" (dimmed, or offer to rewatch first episode).
-  - Clicking this button navigates to `PlayerView` with the recommended episode. If resuming, pass the `position_secs` so the player can seek.
-
-- **Episode list:**
-  - Each row shows: episode index (1-based for display, i.e. `episode.index + 1`), episode title, and watch state icon on the right.
-  - Watch state indicators:
-    - Completed: checkmark icon (`checkmark.circle.fill`, green tint)
-    - In-progress: half-filled circle (`circle.lefthalf.filled`, blue tint) with formatted time position
-    - Unwatched: empty circle (`circle`, gray)
-  - Clicking an episode row navigates to `PlayerView` for that episode. If the episode has progress, pass it for resume.
-
-- **Refresh on return:** When the user returns from `PlayerView` (back navigation), the view should refresh its data. Use `.task(id:)` with a refresh trigger or `.onAppear` to re-fetch.
+- On appear: fetch `GET /api/series/{id}` and `GET /api/series/{id}/next` concurrently
+- Selecting an episode or the continue button → present `PlayerView` as `.fullScreenCover`
+- **Refresh on return** from player: re-fetch both endpoints via `.onAppear`
 
 **Focus behavior:**
 - The "Continue watching" button should have **initial focus** when the view appears. Use `@FocusState` and `.defaultFocus()` to achieve this.

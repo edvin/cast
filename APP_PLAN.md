@@ -204,6 +204,27 @@ struct ProgressUpdate: Codable {
 - `progress` on `EpisodeItem` is `Optional` — it is `null` when an episode has never been watched.
 - `episode` on `NextEpisodeResponse` is `Optional` — it is `null` when all episodes are watched (reason = `"all_watched"`).
 
+### Error Responses
+
+All server endpoints return structured JSON errors on failure:
+
+```swift
+/// Server error response — returned by all endpoints on failure
+struct ApiError: Codable {
+    let error: String      // Human-readable error message
+    let code: Int          // HTTP status code (404, 403, 500, 503)
+    let detail: String?    // Optional additional context
+}
+```
+
+Example server error responses:
+- `404`: `{"error": "Series not found", "code": 404, "detail": null}`
+- `403`: `{"error": "Access denied", "code": 403, "detail": null}`
+- `500`: `{"error": "Failed to read file", "code": 500, "detail": null}`
+- `503`: `{"error": "TMDB API key not configured", "code": 503, "detail": "This feature requires a TMDB API key"}`
+
+The app should handle these errors gracefully — see **Section 9.5: Error Handling** below.
+
 ---
 
 ## 4. Server Connection — `Models/ServerConnection.swift`
@@ -1236,6 +1257,169 @@ This ensures the seek + play + progress reporter all start immediately.
 
 **Presenting the player:**
 The player is shown via `.fullScreenCover()` from `SeriesDetailView`. This gives a full-screen modal presentation, which is the standard for video playback on tvOS. When dismissed (by user or by end-of-playback), control returns to `SeriesDetailView` which re-fetches data to show updated progress.
+
+---
+
+## 9.5 Error Handling — `Views/ErrorView.swift`
+
+**Purpose:** A reusable error view shown when any API call fails. Displays a clear error message with Retry and Cancel/Back actions.
+
+**The server returns structured JSON errors** (see Section 3 — Error Responses). The app should parse these and display them nicely.
+
+### APIClient Error Handling
+
+Update `APIClient` to decode error responses:
+
+```swift
+enum CastError: LocalizedError {
+    case serverError(ApiError)
+    case networkError(String)
+    case decodingError(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .serverError(let apiError):
+            return apiError.error
+        case .networkError(let msg):
+            return msg
+        case .decodingError(let msg):
+            return "Data error: \(msg)"
+        }
+    }
+
+    var detail: String? {
+        switch self {
+        case .serverError(let apiError):
+            return apiError.detail
+        default:
+            return nil
+        }
+    }
+}
+
+// In APIClient, add a helper for all requests:
+private func request<T: Decodable>(_ url: URL) async throws -> T {
+    let (data, response) = try await URLSession.shared.data(from: url)
+    guard let http = response as? HTTPURLResponse else {
+        throw CastError.networkError("Invalid response")
+    }
+    if http.statusCode >= 400 {
+        if let apiError = try? JSONDecoder().decode(ApiError.self, from: data) {
+            throw CastError.serverError(apiError)
+        }
+        throw CastError.networkError("Server returned \(http.statusCode)")
+    }
+    do {
+        return try JSONDecoder().decode(T.self, from: data)
+    } catch {
+        throw CastError.decodingError(error.localizedDescription)
+    }
+}
+```
+
+### ErrorView
+
+A standalone view that can be shown anywhere an error occurs:
+
+```swift
+struct ErrorView: View {
+    let title: String
+    let message: String
+    let detail: String?
+    let onRetry: (() -> Void)?
+    let onDismiss: (() -> Void)?
+
+    var body: some View {
+        VStack(spacing: 40) {
+            // Error icon
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 80))
+                .foregroundColor(.orange)
+
+            // Title
+            Text(title)
+                .font(.title)
+                .multilineTextAlignment(.center)
+
+            // Message
+            Text(message)
+                .font(.body)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 600)
+
+            // Detail (if present)
+            if let detail {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+
+            // Action buttons
+            HStack(spacing: 40) {
+                if let onRetry {
+                    Button("Try Again") { onRetry() }
+                        .buttonStyle(.borderedProminent)
+                }
+                if let onDismiss {
+                    Button("Go Back") { onDismiss() }
+                }
+            }
+        }
+        .padding(60)
+    }
+}
+```
+
+### Usage Pattern in Views
+
+Every view that loads data should follow this pattern:
+
+```swift
+struct SeriesGridView: View {
+    @State private var series: [SeriesListItem] = []
+    @State private var error: CastError?
+    @State private var isLoading = true
+
+    var body: some View {
+        Group {
+            if let error {
+                ErrorView(
+                    title: "Unable to Load Series",
+                    message: error.errorDescription ?? "An unknown error occurred",
+                    detail: error.detail,
+                    onRetry: { self.error = nil; Task { await loadData() } },
+                    onDismiss: nil  // or navigate back
+                )
+            } else if isLoading {
+                ProgressView("Loading...")
+            } else {
+                // Normal content
+                seriesGrid
+            }
+        }
+        .task { await loadData() }
+    }
+
+    private func loadData() async {
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            series = try await client.listSeries()
+            error = nil
+        } catch let err as CastError {
+            error = err
+        } catch {
+            self.error = .networkError(error.localizedDescription)
+        }
+    }
+}
+```
+
+**Apply this pattern to:** `SeriesGridView`, `SeriesDetailView`, and `ServerDiscoveryView`.
+
+**For PlayerView:** If the stream fails to load, `AVPlayer` will report an error via its `status` property. Observe `AVPlayerItem.status` — if it becomes `.failed`, dismiss the player and show the error in the parent view.
 
 ---
 

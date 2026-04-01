@@ -11,6 +11,63 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 
+// --- Error response ---
+
+#[derive(Debug, Serialize)]
+struct ApiError {
+    error: String,
+    code: u16,
+    detail: Option<String>,
+}
+
+impl ApiError {
+    fn not_found(msg: &str) -> (StatusCode, Json<ApiError>) {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: msg.to_string(),
+                code: 404,
+                detail: None,
+            }),
+        )
+    }
+
+    fn forbidden(msg: &str) -> (StatusCode, Json<ApiError>) {
+        (
+            StatusCode::FORBIDDEN,
+            Json(ApiError {
+                error: msg.to_string(),
+                code: 403,
+                detail: None,
+            }),
+        )
+    }
+
+    fn internal(msg: &str) -> (StatusCode, Json<ApiError>) {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: msg.to_string(),
+                code: 500,
+                detail: None,
+            }),
+        )
+    }
+
+    fn unavailable(msg: &str) -> (StatusCode, Json<ApiError>) {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiError {
+                error: msg.to_string(),
+                code: 503,
+                detail: Some("This feature requires a TMDB API key".to_string()),
+            }),
+        )
+    }
+}
+
+type ApiResult<T> = Result<T, (StatusCode, Json<ApiError>)>;
+
 pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/series", get(list_series))
@@ -98,17 +155,20 @@ struct ProgressUpdate {
 
 /// Validate that a resolved path is within the media root directory.
 /// Prevents path traversal attacks even if library data is somehow corrupted.
-fn safe_media_path(media_root: &std::path::Path, relative: &str) -> Result<std::path::PathBuf, StatusCode> {
+fn safe_media_path(
+    media_root: &std::path::Path,
+    relative: &str,
+) -> Result<std::path::PathBuf, (StatusCode, Json<ApiError>)> {
     let resolved = media_root.join(relative);
-    let canonical = resolved.canonicalize().map_err(|_| StatusCode::NOT_FOUND)?;
-    // Canonicalize media_root too so both sides use the same format
-    // (important on Windows where canonicalize produces \\?\ prefixed paths)
+    let canonical = resolved
+        .canonicalize()
+        .map_err(|_| ApiError::not_found("File not found"))?;
     let canonical_root = media_root
         .canonicalize()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| ApiError::internal("Failed to resolve media path"))?;
     if !canonical.starts_with(&canonical_root) {
         tracing::warn!("Path traversal attempt blocked: {relative:?}");
-        return Err(StatusCode::FORBIDDEN);
+        return Err(ApiError::forbidden("Access denied"));
     }
     Ok(canonical)
 }
@@ -190,9 +250,11 @@ async fn list_series(State(state): State<Arc<AppState>>) -> Json<Vec<SeriesListI
 async fn get_series(
     State(state): State<Arc<AppState>>,
     Path(series_id): Path<String>,
-) -> Result<Json<SeriesDetail>, StatusCode> {
+) -> ApiResult<Json<SeriesDetail>> {
     let lib = state.library.read().await;
-    let series = lib.find_series(&series_id).ok_or(StatusCode::NOT_FOUND)?;
+    let series = lib
+        .find_series(&series_id)
+        .ok_or_else(|| ApiError::not_found("Series not found"))?;
 
     let episodes: Vec<EpisodeItem> = series
         .episodes
@@ -227,9 +289,11 @@ async fn get_series(
 async fn get_next_episode(
     State(state): State<Arc<AppState>>,
     Path(series_id): Path<String>,
-) -> Result<Json<NextEpisodeResponse>, StatusCode> {
+) -> ApiResult<Json<NextEpisodeResponse>> {
     let lib = state.library.read().await;
-    let series = lib.find_series(&series_id).ok_or(StatusCode::NOT_FOUND)?;
+    let series = lib
+        .find_series(&series_id)
+        .ok_or_else(|| ApiError::not_found("Series not found"))?;
 
     if series.episodes.is_empty() {
         return Ok(Json(NextEpisodeResponse {
@@ -291,20 +355,22 @@ async fn get_next_episode(
     }))
 }
 
-async fn get_series_art(
-    State(state): State<Arc<AppState>>,
-    Path(series_id): Path<String>,
-) -> Result<Response, StatusCode> {
+async fn get_series_art(State(state): State<Arc<AppState>>, Path(series_id): Path<String>) -> ApiResult<Response> {
     let lib = state.library.read().await;
-    let series = lib.find_series(&series_id).ok_or(StatusCode::NOT_FOUND)?;
-    let art_rel = series.art.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    let series = lib
+        .find_series(&series_id)
+        .ok_or_else(|| ApiError::not_found("Series not found"))?;
+    let art_rel = series
+        .art
+        .as_ref()
+        .ok_or_else(|| ApiError::not_found("No artwork available for this series"))?;
     let art_path = safe_media_path(&state.media_path, art_rel)?;
 
     let content_type = mime_guess::from_path(&art_path).first_or_octet_stream().to_string();
 
     let data = tokio::fs::read(&art_path)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| ApiError::internal("Failed to read file"))?;
 
     Ok(([(header::CONTENT_TYPE, content_type)], data).into_response())
 }
@@ -314,14 +380,16 @@ async fn stream_episode(
     State(state): State<Arc<AppState>>,
     Path(episode_id): Path<String>,
     headers: HeaderMap,
-) -> Result<Response, StatusCode> {
+) -> ApiResult<Response> {
     let lib = state.library.read().await;
-    let (_series, episode) = lib.find_episode(&episode_id).ok_or(StatusCode::NOT_FOUND)?;
+    let (_series, episode) = lib
+        .find_episode(&episode_id)
+        .ok_or_else(|| ApiError::not_found("Episode not found"))?;
     let file_path = safe_media_path(&state.media_path, &episode.path)?;
     let file_size = file_path
         .metadata()
         .map(|m| m.len())
-        .map_err(|_| StatusCode::NOT_FOUND)?;
+        .map_err(|_| ApiError::not_found("Video file not found"))?;
 
     let content_type = mime_guess::from_path(&file_path).first_or_octet_stream().to_string();
 
@@ -336,10 +404,10 @@ async fn stream_episode(
             let length = end - start + 1;
             let mut file = tokio::fs::File::open(&file_path)
                 .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                .map_err(|_| ApiError::internal("Failed to read file"))?;
             file.seek(std::io::SeekFrom::Start(start))
                 .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                .map_err(|_| ApiError::internal("Failed to read file"))?;
             let limited = file.take(length);
             let stream = ReaderStream::new(limited);
             let body = axum::body::Body::from_stream(stream);
@@ -356,7 +424,7 @@ async fn stream_episode(
         None => {
             let file = tokio::fs::File::open(&file_path)
                 .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                .map_err(|_| ApiError::internal("Failed to read file"))?;
             let stream = ReaderStream::new(file);
             let body = axum::body::Body::from_stream(stream);
 
@@ -402,7 +470,7 @@ fn parse_range(range_header: &str, file_size: u64) -> Option<(u64, u64)> {
 async fn get_progress(
     State(state): State<Arc<AppState>>,
     Path(episode_id): Path<String>,
-) -> Result<Json<Option<EpisodeProgress>>, StatusCode> {
+) -> ApiResult<Json<Option<EpisodeProgress>>> {
     let progress = state.db.get_progress(&episode_id).map(|p| EpisodeProgress {
         position_secs: p.position_secs,
         duration_secs: p.duration_secs,
@@ -415,11 +483,11 @@ async fn update_progress(
     State(state): State<Arc<AppState>>,
     Path(episode_id): Path<String>,
     Json(body): Json<ProgressUpdate>,
-) -> Result<StatusCode, StatusCode> {
+) -> ApiResult<StatusCode> {
     state
         .db
         .update_progress(&episode_id, body.position_secs, body.duration_secs)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| ApiError::internal("Failed to update progress"))?;
     Ok(StatusCode::OK)
 }
 
@@ -427,13 +495,15 @@ async fn get_all_progress(State(state): State<Arc<AppState>>) -> Json<Vec<crate:
     Json(state.db.get_all_progress())
 }
 
-async fn get_series_backdrop(
-    State(state): State<Arc<AppState>>,
-    Path(series_id): Path<String>,
-) -> Result<Response, StatusCode> {
+async fn get_series_backdrop(State(state): State<Arc<AppState>>, Path(series_id): Path<String>) -> ApiResult<Response> {
     let lib = state.library.read().await;
-    let series = lib.find_series(&series_id).ok_or(StatusCode::NOT_FOUND)?;
-    let backdrop_rel = series.backdrop.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    let series = lib
+        .find_series(&series_id)
+        .ok_or_else(|| ApiError::not_found("Series not found"))?;
+    let backdrop_rel = series
+        .backdrop
+        .as_ref()
+        .ok_or_else(|| ApiError::not_found("No backdrop available for this series"))?;
     let backdrop_path = safe_media_path(&state.media_path, backdrop_rel)?;
 
     let content_type = mime_guess::from_path(&backdrop_path)
@@ -442,7 +512,7 @@ async fn get_series_backdrop(
 
     let data = tokio::fs::read(&backdrop_path)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| ApiError::internal("Failed to read file"))?;
 
     Ok(([(header::CONTENT_TYPE, content_type)], data).into_response())
 }
@@ -451,20 +521,22 @@ async fn get_series_backdrop(
 async fn get_episode_thumbnail(
     State(state): State<Arc<AppState>>,
     Path(episode_id): Path<String>,
-) -> Result<Response, StatusCode> {
+) -> ApiResult<Response> {
     let thumb_dir = state.media_path.join(".thumbnails");
     let thumb_path = thumb_dir.join(format!("{episode_id}.jpg"));
 
     // Generate on-demand if missing
     if !thumb_path.exists() {
         let lib = state.library.read().await;
-        let (_series, episode) = lib.find_episode(&episode_id).ok_or(StatusCode::NOT_FOUND)?;
+        let (_series, episode) = lib
+            .find_episode(&episode_id)
+            .ok_or_else(|| ApiError::not_found("Episode not found"))?;
         let video_path = safe_media_path(&state.media_path, &episode.path)?;
 
         // Create thumbnail directory
         tokio::fs::create_dir_all(&thumb_dir)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|_| ApiError::internal("Failed to create thumbnail directory"))?;
 
         // Generate thumbnail at ~10% or 30s
         let duration = crate::media::probe_duration(&video_path).unwrap_or(300.0);
@@ -474,17 +546,17 @@ async fn get_episode_thumbnail(
         let tp = thumb_path.clone();
         tokio::task::spawn_blocking(move || crate::media::generate_thumbnail(&vp, &tp, timestamp))
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|_| ApiError::internal("Failed to generate thumbnail"))?
+            .map_err(|_| ApiError::internal("Failed to generate thumbnail"))?;
     }
 
     if !thumb_path.exists() {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(ApiError::not_found("Episode not found"));
     }
 
     let data = tokio::fs::read(&thumb_path)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| ApiError::internal("Failed to read file"))?;
 
     Ok(([(header::CONTENT_TYPE, "image/jpeg".to_string())], data).into_response())
 }
@@ -496,10 +568,10 @@ struct FetchMetadataResponse {
 }
 
 /// Trigger TMDB metadata/art fetch for all series
-async fn fetch_metadata(State(state): State<Arc<AppState>>) -> Result<Json<FetchMetadataResponse>, StatusCode> {
+async fn fetch_metadata(State(state): State<Arc<AppState>>) -> ApiResult<Json<FetchMetadataResponse>> {
     let client = state.tmdb.as_ref().ok_or_else(|| {
         tracing::warn!("TMDB fetch requested but no API key configured");
-        StatusCode::SERVICE_UNAVAILABLE
+        ApiError::unavailable("TMDB API key not configured")
     })?;
 
     let series_info: Vec<(String, String, bool)> = {

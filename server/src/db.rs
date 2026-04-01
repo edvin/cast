@@ -16,6 +16,31 @@ pub struct WatchProgress {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SeriesMetadata {
+    pub series_id: String,
+    pub tmdb_id: Option<u64>,
+    pub title: Option<String>,
+    pub overview: Option<String>,
+    pub first_air_date: Option<String>,
+    pub genres: Option<String>,
+    pub rating: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EpisodeMetadata {
+    pub episode_id: String,
+    pub series_id: String,
+    pub tmdb_episode_id: Option<u64>,
+    pub season_number: Option<u32>,
+    pub episode_number: Option<u32>,
+    pub title: Option<String>,
+    pub overview: Option<String>,
+    pub air_date: Option<String>,
+    pub runtime_minutes: Option<u32>,
+    pub still_url: Option<String>,
+}
+
 impl Database {
     pub fn new(media_path: &Path) -> Result<Self, rusqlite::Error> {
         let db_path = media_path.join("cast.db");
@@ -28,6 +53,32 @@ impl Database {
                 duration_secs REAL NOT NULL DEFAULT 0,
                 completed INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS series_metadata (
+                series_id TEXT PRIMARY KEY,
+                tmdb_id INTEGER,
+                title TEXT,
+                overview TEXT,
+                first_air_date TEXT,
+                genres TEXT,
+                rating REAL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS episode_metadata (
+                episode_id TEXT NOT NULL,
+                series_id TEXT NOT NULL,
+                tmdb_episode_id INTEGER,
+                season_number INTEGER,
+                episode_number INTEGER,
+                title TEXT,
+                overview TEXT,
+                air_date TEXT,
+                runtime_minutes INTEGER,
+                still_url TEXT,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (series_id, season_number, episode_number)
             );",
         )?;
 
@@ -126,6 +177,157 @@ impl Database {
             params![episode_id, position_secs, duration_secs, completed as i32],
         )?;
         Ok(())
+    }
+
+    pub fn save_series_metadata(&self, meta: &SeriesMetadata) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO series_metadata
+                (series_id, tmdb_id, title, overview, first_air_date, genres, rating, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))",
+            params![
+                meta.series_id,
+                meta.tmdb_id.map(|v| v as i64),
+                meta.title,
+                meta.overview,
+                meta.first_air_date,
+                meta.genres,
+                meta.rating,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_series_metadata(&self, series_id: &str) -> Option<SeriesMetadata> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT series_id, tmdb_id, title, overview, first_air_date, genres, rating
+             FROM series_metadata WHERE series_id = ?1",
+            params![series_id],
+            |row| {
+                Ok(SeriesMetadata {
+                    series_id: row.get(0)?,
+                    tmdb_id: row.get::<_, Option<i64>>(1)?.map(|v| v as u64),
+                    title: row.get(2)?,
+                    overview: row.get(3)?,
+                    first_air_date: row.get(4)?,
+                    genres: row.get(5)?,
+                    rating: row.get(6)?,
+                })
+            },
+        )
+        .ok()
+    }
+
+    pub fn save_episode_metadata(&self, meta: &EpisodeMetadata) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO episode_metadata
+                (episode_id, series_id, tmdb_episode_id, season_number, episode_number,
+                 title, overview, air_date, runtime_minutes, still_url, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, datetime('now'))
+             ON CONFLICT(series_id, season_number, episode_number) DO UPDATE SET
+                tmdb_episode_id = ?3, title = ?6, overview = ?7, air_date = ?8,
+                runtime_minutes = ?9, still_url = ?10, updated_at = datetime('now')",
+            params![
+                meta.episode_id,
+                meta.series_id,
+                meta.tmdb_episode_id.map(|v| v as i64),
+                meta.season_number.map(|v| v as i64),
+                meta.episode_number.map(|v| v as i64),
+                meta.title,
+                meta.overview,
+                meta.air_date,
+                meta.runtime_minutes.map(|v| v as i64),
+                meta.still_url,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_episode_metadata(&self, episode_id: &str) -> Option<EpisodeMetadata> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT episode_id, series_id, tmdb_episode_id, season_number, episode_number,
+                    title, overview, air_date, runtime_minutes, still_url
+             FROM episode_metadata WHERE episode_id = ?1",
+            params![episode_id],
+            |row| {
+                Ok(EpisodeMetadata {
+                    episode_id: row.get(0)?,
+                    series_id: row.get(1)?,
+                    tmdb_episode_id: row.get::<_, Option<i64>>(2)?.map(|v| v as u64),
+                    season_number: row.get::<_, Option<i64>>(3)?.map(|v| v as u32),
+                    episode_number: row.get::<_, Option<i64>>(4)?.map(|v| v as u32),
+                    title: row.get(5)?,
+                    overview: row.get(6)?,
+                    air_date: row.get(7)?,
+                    runtime_minutes: row.get::<_, Option<i64>>(8)?.map(|v| v as u32),
+                    still_url: row.get(9)?,
+                })
+            },
+        )
+        .ok()
+    }
+
+    pub fn get_episode_metadata_by_number(
+        &self,
+        series_id: &str,
+        season: u32,
+        episode: u32,
+    ) -> Option<EpisodeMetadata> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT episode_id, series_id, tmdb_episode_id, season_number, episode_number,
+                    title, overview, air_date, runtime_minutes, still_url
+             FROM episode_metadata WHERE series_id = ?1 AND season_number = ?2 AND episode_number = ?3",
+            params![series_id, season as i64, episode as i64],
+            |row| {
+                Ok(EpisodeMetadata {
+                    episode_id: row.get(0)?,
+                    series_id: row.get(1)?,
+                    tmdb_episode_id: row.get::<_, Option<i64>>(2)?.map(|v| v as u64),
+                    season_number: row.get::<_, Option<i64>>(3)?.map(|v| v as u32),
+                    episode_number: row.get::<_, Option<i64>>(4)?.map(|v| v as u32),
+                    title: row.get(5)?,
+                    overview: row.get(6)?,
+                    air_date: row.get(7)?,
+                    runtime_minutes: row.get::<_, Option<i64>>(8)?.map(|v| v as u32),
+                    still_url: row.get(9)?,
+                })
+            },
+        )
+        .ok()
+    }
+
+    pub fn get_series_episode_metadata(&self, series_id: &str) -> Vec<EpisodeMetadata> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT episode_id, series_id, tmdb_episode_id, season_number, episode_number,
+                        title, overview, air_date, runtime_minutes, still_url
+                 FROM episode_metadata WHERE series_id = ?1
+                 ORDER BY season_number, episode_number",
+            )
+            .unwrap();
+
+        stmt.query_map(params![series_id], |row| {
+            Ok(EpisodeMetadata {
+                episode_id: row.get(0)?,
+                series_id: row.get(1)?,
+                tmdb_episode_id: row.get::<_, Option<i64>>(2)?.map(|v| v as u64),
+                season_number: row.get::<_, Option<i64>>(3)?.map(|v| v as u32),
+                episode_number: row.get::<_, Option<i64>>(4)?.map(|v| v as u32),
+                title: row.get(5)?,
+                overview: row.get(6)?,
+                air_date: row.get(7)?,
+                runtime_minutes: row.get::<_, Option<i64>>(8)?.map(|v| v as u32),
+                still_url: row.get(9)?,
+            })
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect()
     }
 }
 

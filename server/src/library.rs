@@ -1,6 +1,8 @@
+use regex::Regex;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::LazyLock;
 use uuid::Uuid;
 
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "mkv", "avi", "webm"];
@@ -51,6 +53,15 @@ pub struct Episode {
     pub size_bytes: u64,
     /// Sort index (derived from filename ordering)
     pub index: usize,
+    pub season_number: Option<u32>,
+    pub episode_number: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedEpisodeInfo {
+    pub season: Option<u32>,
+    pub episode: Option<u32>,
+    pub title: String,
 }
 
 fn stable_id(path: &str) -> String {
@@ -62,6 +73,110 @@ fn is_video(path: &Path) -> bool {
         .and_then(|e| e.to_str())
         .map(|e| VIDEO_EXTENSIONS.contains(&e.to_lowercase().as_str()))
         .unwrap_or(false)
+}
+
+/// Clean up a raw title extracted from a filename: replace dots/underscores with spaces,
+/// strip leading separator characters, and trim whitespace.
+fn clean_title(raw: &str) -> String {
+    let s = raw.replace(['.', '_'], " ");
+    let s = s.trim();
+    // Strip a leading " - " or "- " or " -" separator
+    let s = s.strip_prefix("- ").or_else(|| s.strip_prefix('-')).unwrap_or(s);
+    s.trim().to_string()
+}
+
+static RE_SXXEXX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^S(\d+)E(\d+)[\s.\-]*(.*)$").unwrap());
+static RE_NNXNN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^(\d+)x(\d+)[\s.\-]*(.*)$").unwrap());
+static RE_EPISODE_WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^Episode\s+(\d+)[\s.\-]*(.*)$").unwrap());
+static RE_BARE_NUM_TITLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+)[\s.\-]+(.+)$").unwrap());
+static RE_BARE_NUM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+)$").unwrap());
+
+pub fn parse_episode_filename(filename: &str) -> ParsedEpisodeInfo {
+    // Strip extension first
+    let stem = Path::new(filename).file_stem().unwrap_or_default().to_string_lossy();
+    let stem = stem.trim();
+
+    // S01E03 - Episode Title  /  S01E03.Episode.Title  /  S1E3
+    if let Some(caps) = RE_SXXEXX.captures(stem) {
+        let season: u32 = caps[1].parse().unwrap();
+        let episode: u32 = caps[2].parse().unwrap();
+        let raw_title = caps.get(3).map(|m| m.as_str()).unwrap_or("");
+        let title = clean_title(raw_title);
+        return ParsedEpisodeInfo {
+            season: Some(season),
+            episode: Some(episode),
+            title: if title.is_empty() {
+                format!("Episode {episode}")
+            } else {
+                title
+            },
+        };
+    }
+
+    // 01x03 - Title
+    if let Some(caps) = RE_NNXNN.captures(stem) {
+        let season: u32 = caps[1].parse().unwrap();
+        let episode: u32 = caps[2].parse().unwrap();
+        let raw_title = caps.get(3).map(|m| m.as_str()).unwrap_or("");
+        let title = clean_title(raw_title);
+        return ParsedEpisodeInfo {
+            season: Some(season),
+            episode: Some(episode),
+            title: if title.is_empty() {
+                format!("Episode {episode}")
+            } else {
+                title
+            },
+        };
+    }
+
+    // Episode 03 - Title
+    if let Some(caps) = RE_EPISODE_WORD.captures(stem) {
+        let episode: u32 = caps[1].parse().unwrap();
+        let raw_title = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+        let title = clean_title(raw_title);
+        return ParsedEpisodeInfo {
+            season: None,
+            episode: Some(episode),
+            title: if title.is_empty() {
+                format!("Episode {episode}")
+            } else {
+                title
+            },
+        };
+    }
+
+    // 03 - Title  (number followed by separator and title text)
+    if let Some(caps) = RE_BARE_NUM_TITLE.captures(stem) {
+        let episode: u32 = caps[1].parse().unwrap();
+        let title = clean_title(&caps[2]);
+        return ParsedEpisodeInfo {
+            season: None,
+            episode: Some(episode),
+            title: if title.is_empty() {
+                format!("Episode {episode}")
+            } else {
+                title
+            },
+        };
+    }
+
+    // 03  (bare number)
+    if let Some(caps) = RE_BARE_NUM.captures(stem) {
+        let episode: u32 = caps[1].parse().unwrap();
+        return ParsedEpisodeInfo {
+            season: None,
+            episode: Some(episode),
+            title: format!("Episode {episode}"),
+        };
+    }
+
+    // Fallback: no parseable season/episode
+    ParsedEpisodeInfo {
+        season: None,
+        episode: None,
+        title: clean_title(stem),
+    }
 }
 
 impl Library {
@@ -122,20 +237,17 @@ impl Library {
                     let ep_rel_path = format!("{rel_path}/{filename}");
                     let size = f.metadata().map(|m| m.len()).unwrap_or(0);
 
-                    // Derive a display title from filename (strip extension)
-                    let title = Path::new(&filename)
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
+                    let parsed = parse_episode_filename(&filename);
 
                     Episode {
                         id: stable_id(&ep_rel_path),
-                        title,
+                        title: parsed.title,
                         path: ep_rel_path,
                         filename,
                         size_bytes: size,
                         index: i,
+                        season_number: parsed.season,
+                        episode_number: parsed.episode,
                     }
                 })
                 .collect();
@@ -201,8 +313,12 @@ mod tests {
         let series = lib.series.values().next().unwrap();
         assert_eq!(series.title, "Breaking Bad");
         assert_eq!(series.episodes.len(), 2);
-        assert_eq!(series.episodes[0].title, "S01E01");
-        assert_eq!(series.episodes[1].title, "S01E02");
+        assert_eq!(series.episodes[0].title, "Episode 1");
+        assert_eq!(series.episodes[0].season_number, Some(1));
+        assert_eq!(series.episodes[0].episode_number, Some(1));
+        assert_eq!(series.episodes[1].title, "Episode 2");
+        assert_eq!(series.episodes[1].season_number, Some(1));
+        assert_eq!(series.episodes[1].episode_number, Some(2));
         assert_eq!(series.episodes[0].index, 0);
         assert_eq!(series.episodes[1].index, 1);
     }
@@ -391,5 +507,119 @@ mod tests {
 
         let lib = Library::scan(dir.path()).unwrap();
         assert_eq!(lib.series.len(), 3);
+    }
+
+    // --- parse_episode_filename tests ---
+
+    #[test]
+    fn parse_sxxexx_with_dash_title() {
+        let info = parse_episode_filename("S01E03 - Episode Title.mp4");
+        assert_eq!(info.season, Some(1));
+        assert_eq!(info.episode, Some(3));
+        assert_eq!(info.title, "Episode Title");
+    }
+
+    #[test]
+    fn parse_sxxexx_with_dot_title() {
+        let info = parse_episode_filename("S01E03.Episode.Title.mp4");
+        assert_eq!(info.season, Some(1));
+        assert_eq!(info.episode, Some(3));
+        assert_eq!(info.title, "Episode Title");
+    }
+
+    #[test]
+    fn parse_sxxexx_with_space_title() {
+        let info = parse_episode_filename("S01E03 Episode Title.mp4");
+        assert_eq!(info.season, Some(1));
+        assert_eq!(info.episode, Some(3));
+        assert_eq!(info.title, "Episode Title");
+    }
+
+    #[test]
+    fn parse_sxxexx_no_title() {
+        let info = parse_episode_filename("S1E3.mp4");
+        assert_eq!(info.season, Some(1));
+        assert_eq!(info.episode, Some(3));
+        assert_eq!(info.title, "Episode 3");
+    }
+
+    #[test]
+    fn parse_nnxnn_with_title() {
+        let info = parse_episode_filename("01x03 - Title.mp4");
+        assert_eq!(info.season, Some(1));
+        assert_eq!(info.episode, Some(3));
+        assert_eq!(info.title, "Title");
+    }
+
+    #[test]
+    fn parse_episode_word_with_title() {
+        let info = parse_episode_filename("Episode 03 - Title.mp4");
+        assert_eq!(info.season, None);
+        assert_eq!(info.episode, Some(3));
+        assert_eq!(info.title, "Title");
+    }
+
+    #[test]
+    fn parse_bare_number_with_title() {
+        let info = parse_episode_filename("03 - Title.mp4");
+        assert_eq!(info.season, None);
+        assert_eq!(info.episode, Some(3));
+        assert_eq!(info.title, "Title");
+    }
+
+    #[test]
+    fn parse_bare_number_only() {
+        let info = parse_episode_filename("03.mp4");
+        assert_eq!(info.season, None);
+        assert_eq!(info.episode, Some(3));
+        assert_eq!(info.title, "Episode 3");
+    }
+
+    #[test]
+    fn parse_fallback_plain_title() {
+        let info = parse_episode_filename("My Great Video.mp4");
+        assert_eq!(info.season, None);
+        assert_eq!(info.episode, None);
+        assert_eq!(info.title, "My Great Video");
+    }
+
+    #[test]
+    fn parse_sxxexx_case_insensitive() {
+        let info = parse_episode_filename("s02e10 - Finale.mkv");
+        assert_eq!(info.season, Some(2));
+        assert_eq!(info.episode, Some(10));
+        assert_eq!(info.title, "Finale");
+    }
+
+    #[test]
+    fn parse_large_numbers() {
+        let info = parse_episode_filename("S12E199 - Big Number.mp4");
+        assert_eq!(info.season, Some(12));
+        assert_eq!(info.episode, Some(199));
+        assert_eq!(info.title, "Big Number");
+    }
+
+    #[test]
+    fn parse_dotted_fallback() {
+        let info = parse_episode_filename("some.dotted.name.mp4");
+        assert_eq!(info.season, None);
+        assert_eq!(info.episode, None);
+        assert_eq!(info.title, "some dotted name");
+    }
+
+    #[test]
+    fn parse_episode_word_no_title() {
+        let info = parse_episode_filename("Episode 05.mp4");
+        assert_eq!(info.season, None);
+        assert_eq!(info.episode, Some(5));
+        assert_eq!(info.title, "Episode 5");
+    }
+
+    #[test]
+    fn parse_nnxnn_no_title() {
+        let info = parse_episode_filename("02x07.mkv");
+        assert_eq!(info.season, Some(2));
+        assert_eq!(info.episode, Some(7));
+        assert_eq!(info.title, "Episode 7");
     }
 }

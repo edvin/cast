@@ -22,6 +22,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/episodes/{episode_id}/progress", post(update_progress))
         .route("/api/progress", get(get_all_progress))
         .route("/api/series/{series_id}/backdrop", get(get_series_backdrop))
+        .route("/api/episodes/{episode_id}/thumbnail", get(get_episode_thumbnail))
         .route("/api/metadata/fetch", post(fetch_metadata))
         .with_state(state)
 }
@@ -35,7 +36,10 @@ struct SeriesListItem {
     episode_count: usize,
     has_art: bool,
     has_backdrop: bool,
-    /// Summary of watch state for this series
+    overview: Option<String>,
+    genres: Option<String>,
+    rating: Option<f64>,
+    year: Option<String>,
     watched_count: usize,
     total_count: usize,
 }
@@ -46,6 +50,10 @@ struct SeriesDetail {
     title: String,
     has_art: bool,
     has_backdrop: bool,
+    overview: Option<String>,
+    genres: Option<String>,
+    rating: Option<f64>,
+    year: Option<String>,
     episodes: Vec<EpisodeItem>,
 }
 
@@ -54,7 +62,14 @@ struct EpisodeItem {
     id: String,
     title: String,
     index: usize,
+    season_number: Option<u32>,
+    episode_number: Option<u32>,
     size_bytes: u64,
+    duration_secs: Option<f64>,
+    overview: Option<String>,
+    air_date: Option<String>,
+    runtime_minutes: Option<u32>,
+    has_thumbnail: bool,
     progress: Option<EpisodeProgress>,
 }
 
@@ -79,6 +94,44 @@ struct ProgressUpdate {
     duration_secs: f64,
 }
 
+// --- Helpers ---
+
+fn build_episode_item(ep: &crate::library::Episode, series_id: &str, state: &AppState) -> EpisodeItem {
+    let progress = state.db.get_progress(&ep.id).map(|p| EpisodeProgress {
+        position_secs: p.position_secs,
+        duration_secs: p.duration_secs,
+        completed: p.completed,
+    });
+
+    // Look up TMDB metadata by season/episode number
+    let tmdb_meta = ep
+        .season_number
+        .zip(ep.episode_number)
+        .and_then(|(s, e)| state.db.get_episode_metadata_by_number(series_id, s, e));
+
+    // Check for thumbnail file
+    let thumb_path = state.media_path.join(format!(".thumbnails/{}.jpg", ep.id));
+    let has_thumbnail = thumb_path.exists();
+
+    EpisodeItem {
+        id: ep.id.clone(),
+        title: tmdb_meta
+            .as_ref()
+            .and_then(|m| m.title.clone())
+            .unwrap_or_else(|| ep.title.clone()),
+        index: ep.index,
+        season_number: ep.season_number,
+        episode_number: ep.episode_number,
+        size_bytes: ep.size_bytes,
+        duration_secs: None, // populated from ffprobe cache if available
+        overview: tmdb_meta.as_ref().and_then(|m| m.overview.clone()),
+        air_date: tmdb_meta.as_ref().and_then(|m| m.air_date.clone()),
+        runtime_minutes: tmdb_meta.as_ref().and_then(|m| m.runtime_minutes),
+        has_thumbnail,
+        progress,
+    }
+}
+
 // --- Handlers ---
 
 async fn list_series(State(state): State<Arc<AppState>>) -> Json<Vec<SeriesListItem>> {
@@ -90,13 +143,23 @@ async fn list_series(State(state): State<Arc<AppState>>) -> Json<Vec<SeriesListI
             let episode_ids: Vec<String> = s.episodes.iter().map(|e| e.id.clone()).collect();
             let progress = state.db.get_series_progress(&episode_ids);
             let watched_count = progress.iter().filter(|p| p.completed).count();
+            let meta = state.db.get_series_metadata(&s.id);
 
             SeriesListItem {
                 id: s.id.clone(),
-                title: s.title.clone(),
+                title: meta
+                    .as_ref()
+                    .and_then(|m| m.title.clone())
+                    .unwrap_or_else(|| s.title.clone()),
                 episode_count: s.episodes.len(),
                 has_art: s.art.is_some(),
                 has_backdrop: s.backdrop.is_some(),
+                overview: meta.as_ref().and_then(|m| m.overview.clone()),
+                genres: meta.as_ref().and_then(|m| m.genres.clone()),
+                rating: meta.as_ref().and_then(|m| m.rating),
+                year: meta
+                    .as_ref()
+                    .and_then(|m| m.first_air_date.as_ref().map(|d| d[..4].to_string())),
                 watched_count,
                 total_count: s.episodes.len(),
             }
@@ -117,28 +180,25 @@ async fn get_series(
     let episodes: Vec<EpisodeItem> = series
         .episodes
         .iter()
-        .map(|ep| {
-            let progress = state.db.get_progress(&ep.id).map(|p| EpisodeProgress {
-                position_secs: p.position_secs,
-                duration_secs: p.duration_secs,
-                completed: p.completed,
-            });
-
-            EpisodeItem {
-                id: ep.id.clone(),
-                title: ep.title.clone(),
-                index: ep.index,
-                size_bytes: ep.size_bytes,
-                progress,
-            }
-        })
+        .map(|ep| build_episode_item(ep, &series.id, &state))
         .collect();
+
+    let meta = state.db.get_series_metadata(&series.id);
 
     Ok(Json(SeriesDetail {
         id: series.id.clone(),
-        title: series.title.clone(),
+        title: meta
+            .as_ref()
+            .and_then(|m| m.title.clone())
+            .unwrap_or_else(|| series.title.clone()),
         has_art: series.art.is_some(),
         has_backdrop: series.backdrop.is_some(),
+        overview: meta.as_ref().and_then(|m| m.overview.clone()),
+        genres: meta.as_ref().and_then(|m| m.genres.clone()),
+        rating: meta.as_ref().and_then(|m| m.rating),
+        year: meta
+            .as_ref()
+            .and_then(|m| m.first_air_date.as_ref().map(|d| d[..4].to_string())),
         episodes,
     }))
 }
@@ -170,18 +230,14 @@ async fn get_next_episode(
 
     if let Some(current) = in_progress {
         if let Some(ep) = series.episodes.iter().find(|e| e.id == current.episode_id) {
+            let mut item = build_episode_item(ep, &series.id, &state);
+            item.progress = Some(EpisodeProgress {
+                position_secs: current.position_secs,
+                duration_secs: current.duration_secs,
+                completed: false,
+            });
             return Ok(Json(NextEpisodeResponse {
-                episode: Some(EpisodeItem {
-                    id: ep.id.clone(),
-                    title: ep.title.clone(),
-                    index: ep.index,
-                    size_bytes: ep.size_bytes,
-                    progress: Some(EpisodeProgress {
-                        position_secs: current.position_secs,
-                        duration_secs: current.duration_secs,
-                        completed: false,
-                    }),
-                }),
+                episode: Some(item),
                 reason: "resume".to_string(),
             }));
         }
@@ -199,17 +255,10 @@ async fn get_next_episode(
         let next_idx = idx + 1;
         if let Some(next_ep) = series.episodes.iter().find(|e| e.index == next_idx) {
             return Ok(Json(NextEpisodeResponse {
-                episode: Some(EpisodeItem {
-                    id: next_ep.id.clone(),
-                    title: next_ep.title.clone(),
-                    index: next_ep.index,
-                    size_bytes: next_ep.size_bytes,
-                    progress: None,
-                }),
+                episode: Some(build_episode_item(next_ep, &series.id, &state)),
                 reason: "next".to_string(),
             }));
         } else {
-            // All episodes completed
             return Ok(Json(NextEpisodeResponse {
                 episode: None,
                 reason: "all_watched".to_string(),
@@ -220,13 +269,7 @@ async fn get_next_episode(
     // Nothing watched — start from the beginning
     let first = &series.episodes[0];
     Ok(Json(NextEpisodeResponse {
-        episode: Some(EpisodeItem {
-            id: first.id.clone(),
-            title: first.title.clone(),
-            index: first.index,
-            size_bytes: first.size_bytes,
-            progress: None,
-        }),
+        episode: Some(build_episode_item(first, &series.id, &state)),
         reason: "first".to_string(),
     }))
 }
@@ -392,41 +435,81 @@ async fn get_series_backdrop(
     Ok(([(header::CONTENT_TYPE, content_type)], data).into_response())
 }
 
+/// Serve a thumbnail image for an episode (generated via ffmpeg)
+async fn get_episode_thumbnail(
+    State(state): State<Arc<AppState>>,
+    Path(episode_id): Path<String>,
+) -> Result<Response, StatusCode> {
+    let thumb_dir = state.media_path.join(".thumbnails");
+    let thumb_path = thumb_dir.join(format!("{episode_id}.jpg"));
+
+    // Generate on-demand if missing
+    if !thumb_path.exists() {
+        let lib = state.library.read().await;
+        let (_series, episode) = lib.find_episode(&episode_id).ok_or(StatusCode::NOT_FOUND)?;
+        let video_path = state.media_path.join(&episode.path);
+
+        // Create thumbnail directory
+        tokio::fs::create_dir_all(&thumb_dir)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // Generate thumbnail at ~10% or 30s
+        let duration = crate::media::probe_duration(&video_path).unwrap_or(300.0);
+        let timestamp = (duration * 0.1).min(30.0);
+
+        let vp = video_path.clone();
+        let tp = thumb_path.clone();
+        tokio::task::spawn_blocking(move || crate::media::generate_thumbnail(&vp, &tp, timestamp))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+
+    if !thumb_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let data = tokio::fs::read(&thumb_path)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(([(header::CONTENT_TYPE, "image/jpeg".to_string())], data).into_response())
+}
+
 #[derive(Serialize)]
 struct FetchMetadataResponse {
     downloaded: usize,
     message: String,
 }
 
-/// Trigger TMDB metadata/art fetch for series missing artwork
+/// Trigger TMDB metadata/art fetch for all series
 async fn fetch_metadata(State(state): State<Arc<AppState>>) -> Result<Json<FetchMetadataResponse>, StatusCode> {
     let client = state.tmdb.as_ref().ok_or_else(|| {
         tracing::warn!("TMDB fetch requested but no API key configured");
         StatusCode::SERVICE_UNAVAILABLE
     })?;
 
-    let series_info: Vec<(String, bool)> = {
+    let series_info: Vec<(String, String, bool)> = {
         let lib = state.library.read().await;
         lib.series
             .values()
-            .map(|s| (s.title.clone(), s.art.is_some()))
+            .map(|s| (s.id.clone(), s.title.clone(), s.art.is_some()))
             .collect()
     };
 
-    let missing = series_info.iter().filter(|(_, has)| !has).count();
-    let downloaded = crate::tmdb::fetch_missing_art(client, &state.media_path, series_info).await;
+    let total = series_info.len();
+    let downloaded = crate::tmdb::fetch_all_metadata(client, &state.db, &state.media_path, series_info).await;
 
     // Rescan library to pick up new art files
-    if downloaded > 0 {
-        match crate::library::Library::scan(&state.media_path) {
-            Ok(lib) => *state.library.write().await = lib,
-            Err(e) => tracing::warn!("Rescan after metadata fetch failed: {e}"),
-        }
+    match crate::library::Library::scan(&state.media_path) {
+        Ok(lib) => *state.library.write().await = lib,
+        Err(e) => tracing::warn!("Rescan after metadata fetch failed: {e}"),
     }
 
     Ok(Json(FetchMetadataResponse {
         downloaded,
-        message: format!("{downloaded} of {missing} series updated"),
+        message: format!("Processed {total} series, downloaded art for {downloaded}"),
     }))
 }
 
@@ -516,8 +599,8 @@ mod tests {
         assert_eq!(json["title"], "TestShow");
         let episodes = json["episodes"].as_array().unwrap();
         assert_eq!(episodes.len(), 2);
-        assert_eq!(episodes[0]["title"], "S01E01");
-        assert_eq!(episodes[1]["title"], "S01E02");
+        assert_eq!(episodes[0]["title"], "Episode 1");
+        assert_eq!(episodes[1]["title"], "Episode 2");
     }
 
     #[tokio::test]

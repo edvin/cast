@@ -1,6 +1,7 @@
 mod db;
 mod library;
 mod mdns;
+mod media;
 mod routes;
 mod tmdb;
 
@@ -49,6 +50,18 @@ async fn main() {
 
     tracing::info!("Scanning media directory: {:?}", media_path);
 
+    // Check for ffprobe/ffmpeg availability
+    if media::is_ffprobe_available() {
+        tracing::info!("ffprobe detected — episode duration probing enabled");
+    } else {
+        tracing::warn!("ffprobe not found — episode durations will not be available");
+    }
+    if media::is_ffmpeg_available() {
+        tracing::info!("ffmpeg detected — thumbnail generation enabled");
+    } else {
+        tracing::warn!("ffmpeg not found — thumbnails will not be generated");
+    }
+
     let db = db::Database::new(&media_path).expect("Failed to open database");
     let lib = library::Library::scan(&media_path).expect("Failed to scan library");
 
@@ -63,17 +76,21 @@ async fn main() {
         tmdb::TmdbClient::new(key)
     });
 
-    // On startup, fetch missing art if TMDB is configured
+    // On startup, fetch metadata if TMDB is configured
     if let Some(ref client) = tmdb_client {
-        let series_info: Vec<(String, bool)> = lib
+        let series_info: Vec<(String, String, bool)> = lib
             .series
             .values()
-            .map(|s| (s.title.clone(), s.art.is_some()))
+            .map(|s| (s.id.clone(), s.title.clone(), s.art.is_some()))
             .collect();
-        let missing = series_info.iter().filter(|(_, has)| !has).count();
-        if missing > 0 {
-            tracing::info!("Fetching artwork for {missing} series without art...");
-            let downloaded = tmdb::fetch_missing_art(client, &media_path, series_info).await;
+
+        let needs_fetch = series_info
+            .iter()
+            .any(|(id, _, has_art)| !has_art || db.get_series_metadata(id).is_none());
+
+        if needs_fetch {
+            tracing::info!("Fetching metadata from TMDB...");
+            let downloaded = tmdb::fetch_all_metadata(client, &db, &media_path, series_info).await;
             tracing::info!("Downloaded artwork for {downloaded} series");
         }
     }

@@ -82,13 +82,19 @@ struct SeriesListItem: Codable, Identifiable {
     let title: String
     let episodeCount: Int
     let hasArt: Bool
+    let hasBackdrop: Bool
+    let overview: String?
+    let genres: String?
+    let rating: Double?
+    let year: String?
     let watchedCount: Int
     let totalCount: Int
 
     enum CodingKeys: String, CodingKey {
-        case id, title
+        case id, title, overview, genres, rating, year
         case episodeCount = "episode_count"
         case hasArt = "has_art"
+        case hasBackdrop = "has_backdrop"
         case watchedCount = "watched_count"
         case totalCount = "total_count"
     }
@@ -101,11 +107,17 @@ struct SeriesDetail: Codable, Identifiable {
     let id: String
     let title: String
     let hasArt: Bool
+    let hasBackdrop: Bool
+    let overview: String?
+    let genres: String?
+    let rating: Double?
+    let year: String?
     let episodes: [EpisodeItem]
 
     enum CodingKeys: String, CodingKey {
-        case id, title, episodes
+        case id, title, episodes, overview, genres, rating, year
         case hasArt = "has_art"
+        case hasBackdrop = "has_backdrop"
     }
 }
 
@@ -114,12 +126,36 @@ struct EpisodeItem: Codable, Identifiable {
     let id: String
     let title: String
     let index: Int
+    let seasonNumber: Int?
+    let episodeNumber: Int?
     let sizeBytes: Int64
+    let durationSecs: Double?
+    let overview: String?
+    let airDate: String?
+    let runtimeMinutes: Int?
+    let hasThumbnail: Bool
     let progress: EpisodeProgress?
 
     enum CodingKeys: String, CodingKey {
-        case id, title, index, progress
+        case id, title, index, progress, overview
+        case seasonNumber = "season_number"
+        case episodeNumber = "episode_number"
         case sizeBytes = "size_bytes"
+        case durationSecs = "duration_secs"
+        case airDate = "air_date"
+        case runtimeMinutes = "runtime_minutes"
+        case hasThumbnail = "has_thumbnail"
+    }
+
+    /// Display label like "S1 E3" or "Episode 3" or just the index
+    var episodeLabel: String {
+        if let s = seasonNumber, let e = episodeNumber {
+            return "S\(s) E\(e)"
+        }
+        if let e = episodeNumber {
+            return "Episode \(e)"
+        }
+        return "Episode \(index + 1)"
     }
 }
 
@@ -134,13 +170,19 @@ struct EpisodeProgress: Codable {
         case positionSecs = "position_secs"
         case durationSecs = "duration_secs"
     }
+
+    /// Progress as 0.0–1.0
+    var fraction: Double {
+        guard durationSecs > 0 else { return 0 }
+        return positionSecs / durationSecs
+    }
 }
 
 // MARK: - GET /api/series/{id}/next response
 
 struct NextEpisodeResponse: Codable {
     let episode: EpisodeItem?
-    let reason: String
+    let reason: String  // "resume", "next", "first", "all_watched"
 }
 
 // MARK: - POST /api/episodes/{id}/progress request body
@@ -237,6 +279,20 @@ struct APIClient {
         baseURL.appendingPathComponent("api/series/\(seriesId)/art")
     }
 
+    /// GET /api/series/{id}/backdrop
+    /// Returns the URL for the series backdrop image.
+    func backdropURL(seriesId: String) -> URL {
+        baseURL.appendingPathComponent("api/series/\(seriesId)/backdrop")
+    }
+
+    /// POST /api/metadata/fetch
+    /// Triggers TMDB metadata fetch for all series.
+    func fetchMetadata() async throws {
+        var request = URLRequest(url: baseURL.appendingPathComponent("api/metadata/fetch"))
+        request.httpMethod = "POST"
+        let _ = try await URLSession.shared.data(for: request)
+    }
+
     // MARK: - Episodes
 
     /// GET /api/episodes/{id}/stream
@@ -244,6 +300,12 @@ struct APIClient {
     /// Does NOT fetch — just builds the URL.
     func streamURL(episodeId: String) -> URL {
         baseURL.appendingPathComponent("api/episodes/\(episodeId)/stream")
+    }
+
+    /// GET /api/episodes/{id}/thumbnail
+    /// Returns the URL for the episode thumbnail image.
+    func thumbnailURL(episodeId: String) -> URL {
+        baseURL.appendingPathComponent("api/episodes/\(episodeId)/thumbnail")
     }
 
     /// GET /api/episodes/{id}/progress

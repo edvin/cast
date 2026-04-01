@@ -1,5 +1,7 @@
+use regex::Regex;
 use serde::Deserialize;
 use std::path::Path;
+use std::sync::LazyLock;
 
 const TMDB_BASE: &str = "https://api.themoviedb.org/3";
 const TMDB_IMAGE_BASE: &str = "https://image.tmdb.org/t/p";
@@ -241,22 +243,71 @@ impl TmdbClient {
     }
 }
 
+// Regex patterns for cleaning folder names
+static RE_YEAR_PAREN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\(\d{4}\)").unwrap());
+static RE_YEAR_BRACKET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[\d{4}\]").unwrap());
+static RE_YEAR_BARE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b\d{4}\b").unwrap());
+static RE_RESOLUTION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(1080p|720p|4K|2160p|480p)\b").unwrap());
+static RE_SOURCE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(BluRay|WEB-DL|WEBRip|HDTV|BRRip|DVDRip)\b").unwrap());
+static RE_ENCODING: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(x264|x265|H[.\s]?264|H[.\s]?265|HEVC|AAC|DTS)\b").unwrap());
+static RE_SEASON_TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bS\d+\b").unwrap());
+static RE_MULTI_SPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s{2,}").unwrap());
+
+/// Clean a series folder name for TMDB search by removing year patterns,
+/// resolution/source/encoding tags, and normalizing separators.
+pub fn clean_search_query(folder_name: &str) -> String {
+    let s = folder_name.replace(['.', '_'], " ");
+    let s = RE_YEAR_PAREN.replace_all(&s, "");
+    let s = RE_YEAR_BRACKET.replace_all(&s, "");
+    let s = RE_RESOLUTION.replace_all(&s, "");
+    let s = RE_SOURCE.replace_all(&s, "");
+    let s = RE_ENCODING.replace_all(&s, "");
+    let s = RE_SEASON_TAG.replace_all(&s, "");
+    let s = RE_YEAR_BARE.replace_all(&s, "");
+    let s = RE_MULTI_SPACE.replace_all(&s, " ");
+    s.trim().to_string()
+}
+
 /// Fetch metadata for all series, download art, and store metadata in DB
 pub async fn fetch_all_metadata(
     client: &TmdbClient,
     db: &crate::db::Database,
     media_root: &Path,
-    series_list: Vec<(String, String, bool)>, // (series_id, folder_name, has_art)
+    series_list: Vec<(String, String, bool, Option<u64>)>, // (series_id, folder_name, has_art, tmdb_id_override)
 ) -> usize {
     let mut downloaded = 0;
 
-    for (series_id, title, has_art) in series_list {
+    for (series_id, title, has_art, tmdb_id_override) in series_list {
         // Check if we already have metadata for this series
         if db.get_series_metadata(&series_id).is_some() && has_art {
             continue;
         }
 
-        match client.search_series(&title).await {
+        // Resolve series info: use override ID, cleaned name search, or raw name fallback
+        let search_result = if let Some(tmdb_id) = tmdb_id_override {
+            tracing::info!("Using TMDB ID override {tmdb_id} for '{title}'");
+            client.get_series_detail(tmdb_id).await
+        } else {
+            let cleaned = clean_search_query(&title);
+            let result = if cleaned != title && !cleaned.is_empty() {
+                tracing::debug!("Searching TMDB with cleaned name: '{cleaned}' (was '{title}')");
+                client.search_series(&cleaned).await
+            } else {
+                client.search_series(&title).await
+            };
+            // Fall back to raw folder name if cleaned search found nothing
+            match &result {
+                Ok(None) if cleaned != title && !cleaned.is_empty() => {
+                    tracing::debug!("Cleaned search found nothing, falling back to raw name: '{title}'");
+                    client.search_series(&title).await
+                }
+                _ => result,
+            }
+        };
+
+        match search_result {
             Ok(Some(info)) => {
                 // Save series metadata to DB
                 let meta = crate::db::SeriesMetadata {
@@ -338,4 +389,39 @@ pub async fn fetch_all_metadata(
     }
 
     downloaded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_search_query_removes_year_and_resolution() {
+        assert_eq!(clean_search_query("Breaking Bad (2008) 1080p"), "Breaking Bad");
+    }
+
+    #[test]
+    fn clean_search_query_removes_dots_and_tags() {
+        assert_eq!(clean_search_query("The.Wire.S01.720p.BluRay"), "The Wire");
+    }
+
+    #[test]
+    fn clean_search_query_removes_brackets_and_encoding() {
+        assert_eq!(clean_search_query("My Show [2020] WEB-DL x265"), "My Show");
+    }
+
+    #[test]
+    fn clean_search_query_preserves_simple_name() {
+        assert_eq!(clean_search_query("Simple Name"), "Simple Name");
+    }
+
+    #[test]
+    fn clean_search_query_removes_multiple_tags() {
+        assert_eq!(clean_search_query("Some.Show.2019.1080p.WEB-DL.H.265.AAC"), "Some Show");
+    }
+
+    #[test]
+    fn clean_search_query_handles_underscores() {
+        assert_eq!(clean_search_query("My_Show_2020_HDTV"), "My Show");
+    }
 }

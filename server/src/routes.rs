@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use serde::{Deserialize, Serialize};
@@ -78,8 +78,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/episodes/{episode_id}/progress", get(get_progress))
         .route("/api/episodes/{episode_id}/progress", post(update_progress))
         .route("/api/progress", get(get_all_progress))
+        .route("/api/continue-watching", get(continue_watching))
         .route("/api/series/{series_id}/backdrop", get(get_series_backdrop))
         .route("/api/episodes/{episode_id}/thumbnail", get(get_episode_thumbnail))
+        .route("/api/episodes/{episode_id}/progress", delete(delete_progress))
+        .route("/api/series/{series_id}/progress", delete(delete_series_progress))
         .route("/api/metadata/fetch", post(fetch_metadata))
         .with_state(state)
 }
@@ -93,6 +96,7 @@ struct SeriesListItem {
     episode_count: usize,
     has_art: bool,
     has_backdrop: bool,
+    has_metadata: bool,
     overview: Option<String>,
     genres: Option<String>,
     rating: Option<f64>,
@@ -142,6 +146,15 @@ struct NextEpisodeResponse {
     /// The episode to play next (or resume)
     episode: Option<EpisodeItem>,
     /// Why this episode was selected
+    reason: String,
+}
+
+#[derive(Serialize)]
+struct ContinueWatchingItem {
+    series_id: String,
+    series_title: String,
+    has_art: bool,
+    next_episode: EpisodeItem,
     reason: String,
 }
 
@@ -231,6 +244,7 @@ async fn list_series(State(state): State<Arc<AppState>>) -> Json<Vec<SeriesListI
                 episode_count: s.episodes.len(),
                 has_art: s.art.is_some(),
                 has_backdrop: s.backdrop.is_some(),
+                has_metadata: meta.is_some(),
                 overview: meta.as_ref().and_then(|m| m.overview.clone()),
                 genres: meta.as_ref().and_then(|m| m.genres.clone()),
                 rating: meta.as_ref().and_then(|m| m.rating),
@@ -353,6 +367,92 @@ async fn get_next_episode(
         episode: Some(build_episode_item(first, &series.id, &state)),
         reason: "first".to_string(),
     }))
+}
+
+async fn continue_watching(State(state): State<Arc<AppState>>) -> ApiResult<Json<Vec<ContinueWatchingItem>>> {
+    let lib = state.library.read().await;
+    let mut items: Vec<(String, ContinueWatchingItem)> = Vec::new();
+
+    for series in lib.series.values() {
+        if series.episodes.is_empty() {
+            continue;
+        }
+
+        let episode_ids: Vec<String> = series.episodes.iter().map(|e| e.id.clone()).collect();
+        let all_progress = state.db.get_series_progress(&episode_ids);
+
+        if all_progress.is_empty() {
+            continue;
+        }
+
+        let meta = state.db.get_series_metadata(&series.id);
+        let series_title = meta
+            .as_ref()
+            .and_then(|m| m.title.clone())
+            .unwrap_or_else(|| series.title.clone());
+
+        // Check for in-progress episode (has position but not completed)
+        let in_progress = all_progress.iter().find(|p| !p.completed && p.position_secs > 0.0);
+
+        if let Some(current) = in_progress {
+            if let Some(ep) = series.episodes.iter().find(|e| e.id == current.episode_id) {
+                let mut item = build_episode_item(ep, &series.id, &state);
+                item.progress = Some(EpisodeProgress {
+                    position_secs: current.position_secs,
+                    duration_secs: current.duration_secs,
+                    completed: false,
+                });
+                items.push((
+                    current.updated_at.clone(),
+                    ContinueWatchingItem {
+                        series_id: series.id.clone(),
+                        series_title,
+                        has_art: series.art.is_some(),
+                        next_episode: item,
+                        reason: "resume".to_string(),
+                    },
+                ));
+                continue;
+            }
+        }
+
+        // Find the highest-index completed episode
+        let max_completed_index = series
+            .episodes
+            .iter()
+            .filter(|ep| all_progress.iter().any(|p| p.episode_id == ep.id && p.completed))
+            .map(|ep| ep.index)
+            .max();
+
+        if let Some(idx) = max_completed_index {
+            let next_idx = idx + 1;
+            if let Some(next_ep) = series.episodes.iter().find(|e| e.index == next_idx) {
+                let most_recent = all_progress
+                    .iter()
+                    .map(|p| p.updated_at.as_str())
+                    .max()
+                    .unwrap_or("")
+                    .to_string();
+                items.push((
+                    most_recent,
+                    ContinueWatchingItem {
+                        series_id: series.id.clone(),
+                        series_title,
+                        has_art: series.art.is_some(),
+                        next_episode: build_episode_item(next_ep, &series.id, &state),
+                        reason: "next".to_string(),
+                    },
+                ));
+            }
+            // else: all_watched — skip this series
+        }
+        // No completed episodes and no in-progress — skip
+    }
+
+    // Sort by most recently updated progress (newest first)
+    items.sort_by(|a, b| b.0.cmp(&a.0));
+
+    Ok(Json(items.into_iter().map(|(_, item)| item).collect()))
 }
 
 async fn get_series_art(State(state): State<Arc<AppState>>, Path(series_id): Path<String>) -> ApiResult<Response> {
@@ -495,6 +595,31 @@ async fn get_all_progress(State(state): State<Arc<AppState>>) -> Json<Vec<crate:
     Json(state.db.get_all_progress())
 }
 
+async fn delete_progress(State(state): State<Arc<AppState>>, Path(episode_id): Path<String>) -> ApiResult<StatusCode> {
+    state
+        .db
+        .delete_progress(&episode_id)
+        .map_err(|_| ApiError::internal("Failed to delete progress"))?;
+    Ok(StatusCode::OK)
+}
+
+async fn delete_series_progress(
+    State(state): State<Arc<AppState>>,
+    Path(series_id): Path<String>,
+) -> ApiResult<StatusCode> {
+    let lib = state.library.read().await;
+    let series = lib
+        .find_series(&series_id)
+        .ok_or_else(|| ApiError::not_found("Series not found"))?;
+
+    let episode_ids: Vec<String> = series.episodes.iter().map(|e| e.id.clone()).collect();
+    state
+        .db
+        .delete_series_progress(&episode_ids)
+        .map_err(|_| ApiError::internal("Failed to delete series progress"))?;
+    Ok(StatusCode::OK)
+}
+
 async fn get_series_backdrop(State(state): State<Arc<AppState>>, Path(series_id): Path<String>) -> ApiResult<Response> {
     let lib = state.library.read().await;
     let series = lib
@@ -574,11 +699,11 @@ async fn fetch_metadata(State(state): State<Arc<AppState>>) -> ApiResult<Json<Fe
         ApiError::unavailable("TMDB API key not configured")
     })?;
 
-    let series_info: Vec<(String, String, bool)> = {
+    let series_info: Vec<(String, String, bool, Option<u64>)> = {
         let lib = state.library.read().await;
         lib.series
             .values()
-            .map(|s| (s.id.clone(), s.title.clone(), s.art.is_some()))
+            .map(|s| (s.id.clone(), s.title.clone(), s.art.is_some(), s.tmdb_id_override))
             .collect()
     };
 
@@ -1104,5 +1229,135 @@ mod tests {
             "Expected 404 or 403, got {}",
             response.status()
         );
+    }
+
+    // --- Progress deletion tests ---
+
+    #[tokio::test]
+    async fn delete_single_episode_progress() {
+        let (_dir, state, _series_id, ep_ids) = setup_test_state();
+        let ep_id = &ep_ids[0];
+
+        // Create progress
+        state.db.update_progress(ep_id, 120.0, 3600.0).unwrap();
+        assert!(state.db.get_progress(ep_id).is_some());
+
+        // Delete via API
+        let response = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/episodes/{ep_id}/progress"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify gone
+        assert!(state.db.get_progress(ep_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_series_progress_removes_all_episodes() {
+        let (_dir, state, series_id, ep_ids) = setup_test_state();
+
+        // Create progress for both episodes
+        state.db.update_progress(&ep_ids[0], 100.0, 1000.0).unwrap();
+        state.db.update_progress(&ep_ids[1], 200.0, 2000.0).unwrap();
+        assert!(state.db.get_progress(&ep_ids[0]).is_some());
+        assert!(state.db.get_progress(&ep_ids[1]).is_some());
+
+        // Delete all via API
+        let response = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/series/{series_id}/progress"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify both gone
+        assert!(state.db.get_progress(&ep_ids[0]).is_none());
+        assert!(state.db.get_progress(&ep_ids[1]).is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_series_progress_returns_404_for_unknown() {
+        let (_dir, state, _series_id, _ep_ids) = setup_test_state();
+
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/series/nonexistent/progress")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // --- Continue watching tests ---
+
+    #[tokio::test]
+    async fn continue_watching_returns_in_progress_series() {
+        // Setup: two series, mark one episode as in-progress in series A
+        let dir = tempfile::tempdir().unwrap();
+        let series_a_dir = dir.path().join("ShowA");
+        fs::create_dir(&series_a_dir).unwrap();
+        fs::write(series_a_dir.join("S01E01.mp4"), b"video-a1").unwrap();
+        fs::write(series_a_dir.join("S01E02.mp4"), b"video-a2").unwrap();
+
+        let series_b_dir = dir.path().join("ShowB");
+        fs::create_dir(&series_b_dir).unwrap();
+        fs::write(series_b_dir.join("S01E01.mp4"), b"video-b1").unwrap();
+
+        let db = crate::db::Database::new(dir.path()).unwrap();
+        let lib = crate::library::Library::scan(dir.path()).unwrap();
+
+        let series_a = lib.series.values().find(|s| s.title == "ShowA").unwrap();
+        let series_a_id = series_a.id.clone();
+        let ep_a1_id = series_a.episodes[0].id.clone();
+
+        let state = Arc::new(AppState {
+            library: RwLock::new(lib),
+            db,
+            media_path: dir.path().to_path_buf(),
+            tmdb: None,
+        });
+
+        // Mark episode in series A as in-progress
+        state.db.update_progress(&ep_a1_id, 300.0, 1000.0).unwrap();
+
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/continue-watching")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_to_json(response.into_body()).await;
+        let arr = json.as_array().unwrap();
+
+        // Only series A should appear (series B has no progress)
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["series_id"], series_a_id);
+        assert_eq!(arr[0]["series_title"], "ShowA");
+        assert_eq!(arr[0]["reason"], "resume");
+        assert_eq!(arr[0]["next_episode"]["id"], ep_a1_id);
     }
 }

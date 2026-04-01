@@ -98,15 +98,15 @@ async fn main() {
 
     // On startup, fetch metadata if TMDB is configured
     if let Some(ref client) = tmdb_client {
-        let series_info: Vec<(String, String, bool)> = lib
+        let series_info: Vec<(String, String, bool, Option<u64>)> = lib
             .series
             .values()
-            .map(|s| (s.id.clone(), s.title.clone(), s.art.is_some()))
+            .map(|s| (s.id.clone(), s.title.clone(), s.art.is_some(), s.tmdb_id_override))
             .collect();
 
         let needs_fetch = series_info
             .iter()
-            .any(|(id, _, has_art)| !has_art || db.get_series_metadata(id).is_none());
+            .any(|(id, _, has_art, _)| !has_art || db.get_series_metadata(id).is_none());
 
         if needs_fetch {
             tracing::info!("Fetching metadata from TMDB...");

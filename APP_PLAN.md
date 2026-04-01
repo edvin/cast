@@ -83,6 +83,7 @@ struct SeriesListItem: Codable, Identifiable {
     let episodeCount: Int
     let hasArt: Bool
     let hasBackdrop: Bool
+    let hasMetadata: Bool
     let overview: String?
     let genres: String?
     let rating: Double?
@@ -95,6 +96,7 @@ struct SeriesListItem: Codable, Identifiable {
         case episodeCount = "episode_count"
         case hasArt = "has_art"
         case hasBackdrop = "has_backdrop"
+        case hasMetadata = "has_metadata"
         case watchedCount = "watched_count"
         case totalCount = "total_count"
     }
@@ -185,6 +187,27 @@ struct NextEpisodeResponse: Codable {
     let reason: String  // "resume", "next", "first", "all_watched"
 }
 
+// MARK: - GET /api/continue-watching response
+
+/// Series with in-progress or next-up episodes, sorted by most recently watched
+struct ContinueWatchingItem: Codable, Identifiable {
+    let seriesId: String
+    let seriesTitle: String
+    let hasArt: Bool
+    let nextEpisode: EpisodeItem
+    let reason: String  // "resume" or "next"
+
+    var id: String { seriesId }
+
+    enum CodingKeys: String, CodingKey {
+        case reason
+        case seriesId = "series_id"
+        case seriesTitle = "series_title"
+        case hasArt = "has_art"
+        case nextEpisode = "next_episode"
+    }
+}
+
 // MARK: - POST /api/episodes/{id}/progress request body
 
 struct ProgressUpdate: Codable {
@@ -265,6 +288,17 @@ import Foundation
 
 struct APIClient {
     let baseURL: URL
+
+    // MARK: - Continue Watching
+
+    /// GET /api/continue-watching
+    /// Returns series with in-progress/next-up episodes, sorted by most recently watched.
+    /// Show this at the top of the home screen.
+    func continueWatching() async throws -> [ContinueWatchingItem] {
+        let url = baseURL.appendingPathComponent("api/continue-watching")
+        let (data, _) = try await URLSession.shared.data(from: url)
+        return try JSONDecoder().decode([ContinueWatchingItem].self, from: data)
+    }
 
     // MARK: - Series
 
@@ -351,6 +385,24 @@ struct APIClient {
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw URLError(.badServerResponse)
         }
+    }
+
+    /// DELETE /api/episodes/{id}/progress
+    /// Reset watch progress for a single episode (mark as unwatched).
+    func deleteProgress(episodeId: String) async throws {
+        let url = baseURL.appendingPathComponent("api/episodes/\(episodeId)/progress")
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        let _ = try await URLSession.shared.data(for: request)
+    }
+
+    /// DELETE /api/series/{id}/progress
+    /// Reset watch progress for all episodes in a series.
+    func deleteSeriesProgress(seriesId: String) async throws {
+        let url = baseURL.appendingPathComponent("api/series/\(seriesId)/progress")
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        let _ = try await URLSession.shared.data(for: request)
     }
 }
 ```

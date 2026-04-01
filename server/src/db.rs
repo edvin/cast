@@ -300,6 +300,32 @@ impl Database {
         .ok()
     }
 
+    pub fn delete_progress(&self, episode_id: &str) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM watch_progress WHERE episode_id = ?1", params![episode_id])?;
+        Ok(())
+    }
+
+    pub fn delete_series_progress(&self, episode_ids: &[String]) -> Result<(), rusqlite::Error> {
+        if episode_ids.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.lock().unwrap();
+        let placeholders: Vec<String> = episode_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
+        let sql = format!(
+            "DELETE FROM watch_progress WHERE episode_id IN ({})",
+            placeholders.join(", ")
+        );
+        let params: Vec<&dyn rusqlite::types::ToSql> =
+            episode_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+        conn.execute(&sql, params.as_slice())?;
+        Ok(())
+    }
+
     pub fn get_series_episode_metadata(&self, series_id: &str) -> Vec<EpisodeMetadata> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
@@ -465,5 +491,49 @@ mod tests {
         // Now mark as completed
         db.update_progress("ep1", 950.0, 1000.0).unwrap();
         assert!(db.get_progress("ep1").unwrap().completed);
+    }
+
+    #[test]
+    fn delete_progress_removes_entry() {
+        let (_dir, db) = make_db();
+        db.update_progress("ep1", 120.0, 3600.0).unwrap();
+        assert!(db.get_progress("ep1").is_some());
+
+        db.delete_progress("ep1").unwrap();
+        assert!(db.get_progress("ep1").is_none());
+    }
+
+    #[test]
+    fn delete_progress_noop_for_unknown() {
+        let (_dir, db) = make_db();
+        // Should not error even if episode has no progress
+        db.delete_progress("nonexistent").unwrap();
+    }
+
+    #[test]
+    fn delete_series_progress_removes_all() {
+        let (_dir, db) = make_db();
+        db.update_progress("ep1", 10.0, 100.0).unwrap();
+        db.update_progress("ep2", 20.0, 200.0).unwrap();
+        db.update_progress("ep3", 30.0, 300.0).unwrap();
+
+        let ids = vec!["ep1".to_string(), "ep2".to_string(), "ep3".to_string()];
+        db.delete_series_progress(&ids).unwrap();
+
+        assert!(db.get_progress("ep1").is_none());
+        assert!(db.get_progress("ep2").is_none());
+        assert!(db.get_progress("ep3").is_none());
+    }
+
+    #[test]
+    fn delete_series_progress_empty_ids() {
+        let (_dir, db) = make_db();
+        db.update_progress("ep1", 10.0, 100.0).unwrap();
+
+        let ids: Vec<String> = vec![];
+        db.delete_series_progress(&ids).unwrap();
+
+        // ep1 should still exist
+        assert!(db.get_progress("ep1").is_some());
     }
 }

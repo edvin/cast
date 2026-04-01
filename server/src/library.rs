@@ -39,6 +39,8 @@ pub struct Series {
     pub art: Option<String>,
     /// Backdrop/fanart relative path (if found)
     pub backdrop: Option<String>,
+    /// Manual TMDB ID override from tmdb.txt in series folder
+    pub tmdb_id_override: Option<u64>,
     pub episodes: Vec<Episode>,
 }
 
@@ -217,6 +219,18 @@ impl Library {
                 }
             });
 
+            // Check for tmdb.txt override
+            let tmdb_id_override = {
+                let tmdb_path = series_path.join("tmdb.txt");
+                if tmdb_path.exists() {
+                    std::fs::read_to_string(&tmdb_path)
+                        .ok()
+                        .and_then(|s| s.trim().parse::<u64>().ok())
+                } else {
+                    None
+                }
+            };
+
             // Collect episodes (video files in the series directory)
             let mut video_files: Vec<_> = std::fs::read_dir(&series_path)?
                 .filter_map(|e| e.ok())
@@ -260,6 +274,7 @@ impl Library {
                     path: rel_path,
                     art,
                     backdrop,
+                    tmdb_id_override,
                     episodes,
                 },
             );
@@ -621,5 +636,43 @@ mod tests {
         assert_eq!(info.season, Some(2));
         assert_eq!(info.episode, Some(7));
         assert_eq!(info.title, "Episode 7");
+    }
+
+    #[test]
+    fn tmdb_txt_override_detected() {
+        let dir = make_media_dir();
+        let series_dir = dir.path().join("Some Show");
+        fs::create_dir(&series_dir).unwrap();
+        fs::write(series_dir.join("ep.mp4"), b"video").unwrap();
+        fs::write(series_dir.join("tmdb.txt"), "12345\n").unwrap();
+
+        let lib = Library::scan(dir.path()).unwrap();
+        let series = lib.series.values().next().unwrap();
+        assert_eq!(series.tmdb_id_override, Some(12345));
+    }
+
+    #[test]
+    fn tmdb_txt_absent_gives_none() {
+        let dir = make_media_dir();
+        let series_dir = dir.path().join("Show");
+        fs::create_dir(&series_dir).unwrap();
+        fs::write(series_dir.join("ep.mp4"), b"video").unwrap();
+
+        let lib = Library::scan(dir.path()).unwrap();
+        let series = lib.series.values().next().unwrap();
+        assert_eq!(series.tmdb_id_override, None);
+    }
+
+    #[test]
+    fn tmdb_txt_invalid_content_gives_none() {
+        let dir = make_media_dir();
+        let series_dir = dir.path().join("Show");
+        fs::create_dir(&series_dir).unwrap();
+        fs::write(series_dir.join("ep.mp4"), b"video").unwrap();
+        fs::write(series_dir.join("tmdb.txt"), "not-a-number").unwrap();
+
+        let lib = Library::scan(dir.path()).unwrap();
+        let series = lib.series.values().next().unwrap();
+        assert_eq!(series.tmdb_id_override, None);
     }
 }

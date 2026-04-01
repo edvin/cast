@@ -310,7 +310,7 @@ impl TmdbClient {
     /// Download a poster image and save it to the series directory
     pub async fn download_poster(&self, series_dir: &Path, poster_url: &str) -> Result<(), Box<dyn std::error::Error>> {
         let ext = if poster_url.ends_with(".png") { "png" } else { "jpg" };
-        let dest = series_dir.join(format!("poster.{ext}"));
+        let dest = series_dir.join(format!(".poster.{ext}"));
         self.download_image(poster_url, &dest).await?;
         tracing::info!("Downloaded poster to {dest:?}");
         Ok(())
@@ -323,7 +323,7 @@ impl TmdbClient {
         backdrop_url: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let ext = if backdrop_url.ends_with(".png") { "png" } else { "jpg" };
-        let dest = series_dir.join(format!("backdrop.{ext}"));
+        let dest = series_dir.join(format!(".backdrop.{ext}"));
         self.download_image(backdrop_url, &dest).await?;
         tracing::info!("Downloaded backdrop to {dest:?}");
         Ok(())
@@ -428,8 +428,9 @@ pub async fn fetch_all_metadata(
 
                 // Download backdrop if missing
                 if let Some(ref backdrop_url) = info.backdrop_url {
-                    let backdrop_path = media_root.join(&title).join("backdrop.jpg");
-                    if !backdrop_path.exists() {
+                    let backdrop_path = media_root.join(&title).join(".backdrop.jpg");
+                    let legacy_path = media_root.join(&title).join("backdrop.jpg");
+                    if !backdrop_path.exists() && !legacy_path.exists() {
                         if let Err(e) = client.download_backdrop(&media_root.join(&title), backdrop_url).await {
                             tracing::warn!("Failed to download backdrop for '{title}': {e}");
                         }

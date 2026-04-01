@@ -7,16 +7,25 @@ use uuid::Uuid;
 
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "mkv", "avi", "webm"];
 const ART_NAMES: &[&str] = &[
+    ".poster.jpg",
+    ".poster.png",
+    // Legacy names (for backward compatibility)
     "poster.jpg",
     "poster.png",
     "folder.jpg",
     "folder.png",
     "cover.jpg",
     "cover.png",
-    "banner.jpg",
-    "banner.png",
 ];
-const BACKDROP_NAMES: &[&str] = &["backdrop.jpg", "backdrop.png", "fanart.jpg", "fanart.png"];
+const BACKDROP_NAMES: &[&str] = &[
+    ".backdrop.jpg",
+    ".backdrop.png",
+    // Legacy names
+    "backdrop.jpg",
+    "backdrop.png",
+    "fanart.jpg",
+    "fanart.png",
+];
 
 // UUID v5 namespace for generating stable IDs from paths
 const NAMESPACE: Uuid = Uuid::from_bytes([

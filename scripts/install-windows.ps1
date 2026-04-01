@@ -37,7 +37,13 @@ $settings = New-ScheduledTaskSettingsSet @settingsParams
 # Remove existing task if present
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Description "Cast media server"
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERNAME" -LogonType Interactive -RunLevel Limited
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "Cast media server"
+
+# Hide the console window
+$task = Get-ScheduledTask -TaskName $taskName
+$task.Settings.Hidden = $true
+$task | Set-ScheduledTask | Out-Null
 
 Write-Host ""
 Write-Host "Cast Server installed!" -ForegroundColor Green

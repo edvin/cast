@@ -170,6 +170,24 @@ async fn main() {
         }
     });
 
+    // Clean orphaned remux cache hourly
+    let cleanup_state = state.clone();
+    let cleanup_path = media_path.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            let lib = cleanup_state.library.read().await;
+            cleanup_remux_cache(&cleanup_path, &lib);
+        }
+    });
+
+    // Initial cleanup
+    {
+        let lib = state.library.read().await;
+        cleanup_remux_cache(&media_path, &lib);
+    }
+
     let app = routes::create_router(state);
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", args.port))
@@ -178,4 +196,48 @@ async fn main() {
     tracing::info!("Cast server listening on 0.0.0.0:{}", args.port);
 
     axum::serve(listener, app).await.expect("Server error");
+}
+
+/// Remove cached .remux/*.mp4 files whose source video no longer exists
+fn cleanup_remux_cache(media_path: &std::path::Path, lib: &library::Library) {
+    // Collect all known video stems
+    let mut known_stems: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    for series in lib.series.values() {
+        for ep in &series.episodes {
+            let ep_path = media_path.join(&ep.path);
+            if let (Some(parent), Some(stem)) = (ep_path.parent(), ep_path.file_stem()) {
+                let parent_str = parent.to_string_lossy().to_string();
+                let stem_str = stem.to_string_lossy().to_string();
+                known_stems.insert((parent_str, stem_str));
+            }
+        }
+    }
+
+    // Walk all .remux directories and remove orphaned files
+    for series in lib.series.values() {
+        let series_dir = media_path.join(&series.title);
+        let remux_dir = series_dir.join(".remux");
+        if !remux_dir.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&remux_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("mp4") {
+                    if let Some(stem) = path.file_stem() {
+                        let stem_str = stem.to_string_lossy().to_string();
+                        let parent_str = series_dir.to_string_lossy().to_string();
+                        if !known_stems.contains(&(parent_str, stem_str)) {
+                            tracing::info!("Removing orphaned remux cache: {:?}", path.file_name().unwrap());
+                            let _ = std::fs::remove_file(&path);
+                        }
+                    }
+                }
+            }
+            // Remove the .remux dir if empty
+            if std::fs::read_dir(&remux_dir).map(|mut d| d.next().is_none()).unwrap_or(false) {
+                let _ = std::fs::remove_dir(&remux_dir);
+            }
+        }
+    }
 }

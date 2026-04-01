@@ -48,8 +48,8 @@ media/
 Embedded subtitles in the video container (MKV/MP4) are preserved during remux and appear in the tvOS player's subtitle picker.
 
 **Artwork** — place any of these in a show folder and they'll be detected automatically:
-- Poster: `poster.jpg`, `poster.png`, `folder.jpg`, `cover.jpg`
-- Backdrop: `backdrop.jpg`, `fanart.jpg`
+- Poster: `.poster.jpg`, `.poster.png` (also accepts legacy: `poster.jpg`, `folder.jpg`, `cover.jpg`)
+- Backdrop: `.backdrop.jpg`, `.backdrop.png` (also accepts: `backdrop.jpg`, `fanart.jpg`)
 
 Or let TMDB fetch artwork automatically (see below).
 

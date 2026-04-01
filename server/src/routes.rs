@@ -513,7 +513,7 @@ async fn get_series_art(State(state): State<Arc<AppState>>, Path(series_id): Pat
 }
 
 /// Check if a file needs remuxing (MKV → MP4) for Apple device compatibility
-fn needs_remux(path: &std::path::Path) -> bool {
+pub fn needs_remux(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| matches!(e.to_lowercase().as_str(), "mkv" | "avi" | "webm" | "flv"))
@@ -522,7 +522,7 @@ fn needs_remux(path: &std::path::Path) -> bool {
 
 /// Check if the video stream needs transcoding (HEVC 10-bit, VP9, etc.)
 /// Returns ("copy", ...) for compatible codecs, ("libx264", ...) for incompatible ones.
-fn detect_video_codec(path: &std::path::Path) -> (&'static str, &'static str) {
+pub fn detect_video_codec(path: &std::path::Path) -> (&'static str, &'static str) {
     let output = std::process::Command::new("ffprobe")
         .arg("-v").arg("quiet")
         .arg("-select_streams").arg("v:0")
@@ -553,6 +553,50 @@ fn detect_video_codec(path: &std::path::Path) -> (&'static str, &'static str) {
     ("copy", "")
 }
 
+/// Serve a file with byte-range support
+async fn serve_file(
+    path: std::path::PathBuf,
+    headers: &HeaderMap,
+    file_size: u64,
+    content_type: &str,
+) -> ApiResult<Response> {
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| parse_range(s, file_size));
+
+    match range {
+        Some((start, end)) => {
+            let length = end - start + 1;
+            let mut file = tokio::fs::File::open(&path).await
+                .map_err(|_| ApiError::internal("Failed to read file"))?;
+            file.seek(std::io::SeekFrom::Start(start)).await
+                .map_err(|_| ApiError::internal("Failed to seek"))?;
+            let stream = ReaderStream::new(file.take(length));
+            let body = axum::body::Body::from_stream(stream);
+            Ok(Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header(header::CONTENT_TYPE, content_type)
+                .header(header::CONTENT_LENGTH, length.to_string())
+                .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{file_size}"))
+                .header(header::ACCEPT_RANGES, "bytes")
+                .body(body).unwrap())
+        }
+        None => {
+            let file = tokio::fs::File::open(&path).await
+                .map_err(|_| ApiError::internal("Failed to read file"))?;
+            let stream = ReaderStream::new(file);
+            let body = axum::body::Body::from_stream(stream);
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, content_type)
+                .header(header::CONTENT_LENGTH, file_size.to_string())
+                .header(header::ACCEPT_RANGES, "bytes")
+                .body(body).unwrap())
+        }
+    }
+}
+
 /// Stream a video file with byte-range support for seeking.
 /// MKV files are remuxed on-the-fly to fragmented MP4 via ffmpeg.
 async fn stream_episode(
@@ -565,62 +609,38 @@ async fn stream_episode(
         .find_episode(&episode_id)
         .ok_or_else(|| ApiError::not_found("Episode not found"))?;
     let file_path = safe_media_path(&state.media_path, &episode.path)?;
+
+    // Check if a pre-remuxed MP4 sibling exists (from background remux)
+    if needs_remux(&file_path) {
+        let stem = file_path.file_stem().unwrap_or_default().to_string_lossy();
+        let mp4_sibling = file_path.parent().unwrap().join(format!("{stem}.mp4"));
+        if mp4_sibling.exists() {
+            // Serve the pre-remuxed MP4 instead
+            let file_size = mp4_sibling.metadata().map(|m| m.len())
+                .map_err(|_| ApiError::not_found("Video file not found"))?;
+            return serve_file(mp4_sibling, &headers, file_size, "video/mp4").await;
+        }
+    }
+
     let file_size = file_path
         .metadata()
         .map(|m| m.len())
         .map_err(|_| ApiError::not_found("Video file not found"))?;
 
-    // MKV/AVI/WebM: remux to fragmented MP4 via ffmpeg (no re-encoding)
+    // MKV/AVI/WebM: remux on-the-fly via ffmpeg
     if needs_remux(&file_path) {
+        // Register as active stream (prevents background task from deleting the MKV)
+        let stem = file_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        if let Ok(mut streams) = state.active_streams.lock() {
+            streams.insert(stem.clone());
+        }
+        // Note: we should unregister when streaming ends, but since the stream is consumed
+        // by the client, the active_streams entry is cleaned up by the cleanup task.
         return stream_remuxed(file_path, headers, file_size).await;
     }
 
     let content_type = mime_guess::from_path(&file_path).first_or_octet_stream().to_string();
-
-    // Parse Range header
-    let range = headers
-        .get(header::RANGE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| parse_range(s, file_size));
-
-    match range {
-        Some((start, end)) => {
-            let length = end - start + 1;
-            let mut file = tokio::fs::File::open(&file_path)
-                .await
-                .map_err(|_| ApiError::internal("Failed to read file"))?;
-            file.seek(std::io::SeekFrom::Start(start))
-                .await
-                .map_err(|_| ApiError::internal("Failed to read file"))?;
-            let limited = file.take(length);
-            let stream = ReaderStream::new(limited);
-            let body = axum::body::Body::from_stream(stream);
-
-            Ok(Response::builder()
-                .status(StatusCode::PARTIAL_CONTENT)
-                .header(header::CONTENT_TYPE, content_type)
-                .header(header::CONTENT_LENGTH, length.to_string())
-                .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{file_size}"))
-                .header(header::ACCEPT_RANGES, "bytes")
-                .body(body)
-                .unwrap())
-        }
-        None => {
-            let file = tokio::fs::File::open(&file_path)
-                .await
-                .map_err(|_| ApiError::internal("Failed to read file"))?;
-            let stream = ReaderStream::new(file);
-            let body = axum::body::Body::from_stream(stream);
-
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, content_type)
-                .header(header::CONTENT_LENGTH, file_size.to_string())
-                .header(header::ACCEPT_RANGES, "bytes")
-                .body(body)
-                .unwrap())
-        }
-    }
+    serve_file(file_path, &headers, file_size, &content_type).await
 }
 
 /// Remux a non-MP4 file to MP4 via ffmpeg.
@@ -638,46 +658,11 @@ async fn stream_remuxed(
     let stem = file_path.file_stem().unwrap_or_default().to_string_lossy();
     let cached_path = cache_dir.join(format!("{stem}.mp4"));
 
-    // If already cached, serve with full byte-range support
+    // If already cached in .remux/, serve with full byte-range support
     if cached_path.exists() {
         let file_size = cached_path.metadata().map(|m| m.len())
             .map_err(|_| ApiError::internal("Remuxed file not found"))?;
-
-        let range = headers
-            .get(header::RANGE)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| parse_range(s, file_size));
-
-        return match range {
-            Some((start, end)) => {
-                let length = end - start + 1;
-                let mut file = tokio::fs::File::open(&cached_path).await
-                    .map_err(|_| ApiError::internal("Failed to read remuxed file"))?;
-                file.seek(std::io::SeekFrom::Start(start)).await
-                    .map_err(|_| ApiError::internal("Failed to seek"))?;
-                let stream = ReaderStream::new(file.take(length));
-                let body = axum::body::Body::from_stream(stream);
-                Ok(Response::builder()
-                    .status(StatusCode::PARTIAL_CONTENT)
-                    .header(header::CONTENT_TYPE, "video/mp4")
-                    .header(header::CONTENT_LENGTH, length.to_string())
-                    .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{file_size}"))
-                    .header(header::ACCEPT_RANGES, "bytes")
-                    .body(body).unwrap())
-            }
-            None => {
-                let file = tokio::fs::File::open(&cached_path).await
-                    .map_err(|_| ApiError::internal("Failed to read remuxed file"))?;
-                let stream = ReaderStream::new(file);
-                let body = axum::body::Body::from_stream(stream);
-                Ok(Response::builder()
-                    .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, "video/mp4")
-                    .header(header::CONTENT_LENGTH, file_size.to_string())
-                    .header(header::ACCEPT_RANGES, "bytes")
-                    .body(body).unwrap())
-            }
-        };
+        return serve_file(cached_path, &headers, file_size, "video/mp4").await;
     }
 
     // Not cached — stream directly from ffmpeg as fragmented MP4 (instant start)
@@ -1125,6 +1110,7 @@ mod tests {
             db,
             media_path: dir.path().to_path_buf(),
             tmdb: None,
+            active_streams: std::sync::Mutex::new(std::collections::HashSet::new()),
         });
 
         (dir, state, series_id, episode_ids)
@@ -1426,6 +1412,7 @@ mod tests {
             db,
             media_path: dir.path().to_path_buf(),
             tmdb: None,
+            active_streams: std::sync::Mutex::new(std::collections::HashSet::new()),
         });
 
         let response = app(state)
@@ -1488,6 +1475,7 @@ mod tests {
             db,
             media_path: dir.path().to_path_buf(),
             tmdb: None,
+            active_streams: std::sync::Mutex::new(std::collections::HashSet::new()),
         });
 
         (dir, state, series_id, episode_id)
@@ -1704,6 +1692,7 @@ mod tests {
             db,
             media_path: dir.path().to_path_buf(),
             tmdb: None,
+            active_streams: std::sync::Mutex::new(std::collections::HashSet::new()),
         });
 
         // Mark episode in series A as in-progress

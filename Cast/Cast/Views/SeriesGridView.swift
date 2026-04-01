@@ -8,22 +8,21 @@ struct SeriesGridView: View {
     @State private var error: CastError?
     @State private var isRefreshing = false
     @State private var focusedSeriesId: String?
+    @State private var activeBackdropId: String?
+    @State private var backdropDebounce: Task<Void, Never>?
 
     private var client: APIClient? {
         guard let url = connection.baseURL else { return nil }
         return APIClient(baseURL: url)
     }
 
-    /// The backdrop URL for the currently focused series (or first available)
     private var backgroundURL: URL? {
         guard let client else { return nil }
-        // Use focused series backdrop if available
-        if let focusedId = focusedSeriesId,
-           let series = seriesList.first(where: { $0.id == focusedId }),
+        if let activeId = activeBackdropId,
+           let series = seriesList.first(where: { $0.id == activeId }),
            series.hasBackdrop {
-            return client.backdropURL(seriesId: focusedId)
+            return client.backdropURL(seriesId: activeId)
         }
-        // Fall back to first series with backdrop
         if let first = seriesList.first(where: { $0.hasBackdrop }) {
             return client.backdropURL(seriesId: first.id)
         }
@@ -129,6 +128,15 @@ struct SeriesGridView: View {
             SeriesDetailView(seriesId: series.id, seriesTitle: series.title)
         }
         .task { await loadData() }
+        .onChange(of: focusedSeriesId) { _, newId in
+            backdropDebounce?.cancel()
+            backdropDebounce = Task {
+                try? await Task.sleep(for: .milliseconds(500))
+                if !Task.isCancelled {
+                    activeBackdropId = newId
+                }
+            }
+        }
     }
 
     // MARK: - Continue Watching

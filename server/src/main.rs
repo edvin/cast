@@ -42,6 +42,8 @@ pub struct AppState {
     pub db: db::Database,
     pub media_path: PathBuf,
     pub tmdb: Option<tmdb::TmdbClient>,
+    /// Tracks file stems currently being streamed (prevents MKV deletion during playback)
+    pub active_streams: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 #[tokio::main]
@@ -145,6 +147,7 @@ async fn main() {
         db,
         media_path: media_path.clone(),
         tmdb: tmdb_client,
+        active_streams: std::sync::Mutex::new(std::collections::HashSet::new()),
     });
 
     // Start mDNS advertisement
@@ -167,6 +170,117 @@ async fn main() {
                 Ok(lib) => *rescan_state.library.write().await = lib,
                 Err(e) => tracing::warn!("Rescan failed: {}", e),
             }
+        }
+    });
+
+    // Background pre-remux: convert MKV/AVI/etc to MP4 proactively
+    let remux_state = state.clone();
+    let remux_path = media_path.clone();
+    tokio::spawn(async move {
+        // Wait a bit for initial scan to settle
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        loop {
+            let files_to_remux = {
+                let lib = remux_state.library.read().await;
+                let mut files = Vec::new();
+                for series in lib.series.values() {
+                    for ep in &series.episodes {
+                        let ep_path = remux_path.join(&ep.path);
+                        if routes::needs_remux(&ep_path) {
+                            let stem = ep_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                            let mp4_path = ep_path.parent().unwrap().join(format!("{stem}.mp4"));
+                            if !mp4_path.exists() {
+                                files.push((ep_path, mp4_path, stem));
+                            }
+                        }
+                    }
+                }
+                files
+            };
+
+            if files_to_remux.is_empty() {
+                // Nothing to do, check again in 5 minutes
+                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                continue;
+            }
+
+            for (source, target, stem) in &files_to_remux {
+                // Skip if already done (might have been remuxed by a stream request)
+                if target.exists() {
+                    continue;
+                }
+
+                let tmp_path = target.parent().unwrap().join(format!("{stem}.mp4.tmp"));
+                tracing::info!("Background remux: {:?}", source.file_name().unwrap());
+
+                let (video_codec, video_extra) = routes::detect_video_codec(source);
+
+                let mut cmd = std::process::Command::new("ffmpeg");
+                cmd.arg("-hide_banner")
+                    .arg("-loglevel").arg("warning")
+                    .arg("-i").arg(source)
+                    .arg("-c:v").arg(video_codec);
+
+                if video_codec != "copy" {
+                    for part in video_extra.split_whitespace() {
+                        cmd.arg(part);
+                    }
+                }
+
+                let output = cmd
+                    .arg("-c:a").arg("aac")
+                    .arg("-b:a").arg("192k")
+                    .arg("-ac").arg("2")
+                    .arg("-map").arg("0:v:0")
+                    .arg("-map").arg("0:a:0")
+                    .arg("-map").arg("0:s?")
+                    .arg("-c:s").arg("mov_text")
+                    .arg("-movflags").arg("+faststart")
+                    .arg("-y")
+                    .arg(&tmp_path)
+                    .output();
+
+                match output {
+                    Ok(result) if result.status.success() => {
+                        // Rename tmp → final
+                        if std::fs::rename(&tmp_path, target).is_ok() {
+                            tracing::info!("Background remux complete: {:?}", target.file_name().unwrap());
+
+                            // Delete original if not currently being streamed
+                            let is_streaming = remux_state.active_streams.lock()
+                                .map(|s| s.contains(stem))
+                                .unwrap_or(false);
+                            if !is_streaming {
+                                if std::fs::remove_file(source).is_ok() {
+                                    tracing::info!("Deleted original: {:?}", source.file_name().unwrap());
+                                }
+                            } else {
+                                tracing::info!("Skipping delete of {:?} (currently streaming)", source.file_name().unwrap());
+                            }
+                        }
+                    }
+                    Ok(result) => {
+                        let stderr = String::from_utf8_lossy(&result.stderr);
+                        tracing::warn!("Background remux failed for {:?}: {stderr}", source.file_name().unwrap());
+                        let _ = std::fs::remove_file(&tmp_path);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to run ffmpeg for background remux: {e}");
+                        break; // ffmpeg not available, stop trying
+                    }
+                }
+
+                // Small pause between files to avoid overloading the system
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+
+            // Rescan after remuxing to pick up new .mp4 files
+            if let Ok(lib) = library::Library::scan(&remux_path) {
+                *remux_state.library.write().await = lib;
+            }
+
+            // Wait before checking again
+            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
         }
     });
 

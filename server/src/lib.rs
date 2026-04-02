@@ -109,7 +109,10 @@ pub async fn start_server(
         if needs_fetch {
             log("Fetching metadata from TMDB...", &log_cb);
             let downloaded = tmdb::fetch_all_metadata(client, &db, &media_path, series_info).await;
-            log(&format!("Downloaded artwork for {downloaded} series"), &log_cb);
+            if downloaded > 0 {
+                log(&format!("Downloaded artwork for {downloaded} series"), &log_cb);
+            }
+            log("TMDB metadata fetch complete", &log_cb);
         }
     }
 
@@ -178,6 +181,7 @@ pub async fn start_server(
                             if downloaded > 0 {
                                 rescan_state.log(&format!("Downloaded artwork for {downloaded} series"));
                             }
+                            rescan_state.log("TMDB metadata fetch complete");
                             // Rescan again to pick up new art
                             if let Ok(updated_lib) = library::Library::scan(&rescan_path) {
                                 *rescan_state.library.write().await = updated_lib;

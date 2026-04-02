@@ -7,6 +7,7 @@ struct SeriesGridView: View {
     @State private var isLoading = true
     @State private var error: CastError?
     @State private var isRefreshing = false
+    @State private var showUnwatchedOnly = false
 
     private var client: APIClient? {
         guard let url = connection.baseURL else { return nil }
@@ -44,6 +45,23 @@ struct SeriesGridView: View {
                             if !continueWatchingItems.isEmpty {
                                 continueWatchingSection
                             }
+
+                            // Filter toggle
+                            HStack {
+                                Spacer()
+                                Button {
+                                    showUnwatchedOnly.toggle()
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: showUnwatchedOnly ? "eye.slash" : "eye")
+                                        Text(showUnwatchedOnly ? "Show All" : "Unwatched Only")
+                                            .font(.caption)
+                                    }
+                                    .foregroundStyle(showUnwatchedOnly ? .blue : Color(white: 0.6))
+                                }
+                            }
+                            .padding(.horizontal, 80)
+
                             librarySection
                                 .padding(.bottom, 40)
 
@@ -113,12 +131,19 @@ struct SeriesGridView: View {
 
     // MARK: - Library
 
+    private var filteredSeries: [SeriesListItem] {
+        if showUnwatchedOnly {
+            return seriesList.filter { $0.watchedCount < $0.totalCount }
+        }
+        return seriesList
+    }
+
     private var librarySection: some View {
         LazyVGrid(
             columns: [GridItem(.adaptive(minimum: 300, maximum: 380), spacing: 50)],
             spacing: 60
         ) {
-            ForEach(seriesList) { series in
+            ForEach(filteredSeries) { series in
                 NavigationLink(value: series) {
                     SeriesCard(
                         series: series,

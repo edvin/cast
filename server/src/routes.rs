@@ -1348,16 +1348,24 @@ async fn delete_episode(
         .unwrap_or("unknown")
         .to_string();
 
-    if file_path.exists() {
-        std::fs::remove_file(&file_path)
-            .map_err(|e| ApiError::internal(&format!("Failed to delete: {e}")))?;
-    }
-
-    // Also delete the MP4 sibling if it exists
-    if let Some(stem) = file_path.file_stem() {
-        let mp4_sibling = file_path.parent().unwrap().join(format!("{}.mp4", stem.to_string_lossy()));
-        if mp4_sibling.exists() && mp4_sibling != file_path {
-            let _ = std::fs::remove_file(&mp4_sibling);
+    // Delete the video file and all related files (srt, mp4 sibling, tmp)
+    if let (Some(parent), Some(stem)) = (file_path.parent(), file_path.file_stem()) {
+        let stem_str = stem.to_string_lossy();
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                if let Some(entry_stem) = entry_path.file_stem() {
+                    let entry_stem_str = entry_stem.to_string_lossy();
+                    // Delete files that share the same stem or start with "stem."
+                    // This catches: video.mkv, video.mp4, video.srt, video.en.srt, video.mp4.tmp
+                    if entry_stem_str == stem_str
+                        || entry_stem_str.starts_with(&format!("{stem_str}."))
+                        || entry_path.to_string_lossy().starts_with(&format!("{}/{stem_str}.", parent.display()))
+                    {
+                        let _ = std::fs::remove_file(&entry_path);
+                    }
+                }
+            }
         }
     }
 

@@ -329,6 +329,16 @@ struct ToolStatus {
 }
 
 #[tauri::command]
+fn open_folder(state: tauri::State<'_, DesktopState>, series_title: String) -> Result<(), String> {
+    let config = state.config.lock().unwrap().clone();
+    let folder = std::path::Path::new(&config.media_path).join(&series_title);
+    if !folder.exists() {
+        return Err(format!("Folder not found: {}", folder.display()));
+    }
+    open::that(&folder).map_err(|e| format!("Failed to open: {e}"))
+}
+
+#[tauri::command]
 fn play_file(state: tauri::State<'_, DesktopState>, file_path: String) -> Result<(), String> {
     let config = state.config.lock().unwrap().clone();
     let full_path = std::path::Path::new(&config.media_path).join(&file_path);
@@ -374,6 +384,7 @@ pub fn run() {
             ingest_file,
             ingest_files,
             play_file,
+            open_folder,
             get_tools,
         ])
         .on_window_event(|window, event| {

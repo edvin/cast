@@ -569,7 +569,8 @@
                     <span class="summary-chip ${watchedEps > 0 ? 'ok' : ''}"><span class="num">${watchedEps}</span> watched</span>
                     <span class="summary-chip">${withMetadata}/${series.length} with metadata</span>
                     <span style="margin-left:auto; display:flex; gap:8px;">
-                        <button class="action-btn ${showUnwatchedOnly ? 'active-filter' : ''}" onclick="toggleUnwatchedFilter()" id="filterBtn">
+                        <button class="action-btn" onclick="rescanLibrary(this)" id="rescanBtn">🔄 Rescan</button>
+                        <button class="action-btn ${showUnwatchedOnly ? 'active-filter' : ''}" onclick="toggleUnwatchedFilter()">
                             ${showUnwatchedOnly ? '👁 Show All' : '👁 Unwatched Only'}
                         </button>
                         ${watchedEps > 0 ? '<button class="action-btn danger" onclick="showWatchedDialog()">🗑 Delete Watched</button>' : ''}
@@ -790,6 +791,24 @@
                 btn.textContent = 'Failed';
                 btn.disabled = false;
             }
+        }
+
+        let isRescanning = false;
+        async function rescanLibrary(btn) {
+            if (isRescanning) return;
+            isRescanning = true;
+            btn.disabled = true;
+            btn.textContent = '🔄 Scanning...';
+            try {
+                await fetch(apiUrl('/api/rescan'), { method: 'POST' });
+                await loadLibrary();
+                showToast('Library rescanned', '', 'success');
+            } catch (e) {
+                showToast('Rescan failed', String(e), 'error');
+            }
+            btn.textContent = '🔄 Rescan';
+            btn.disabled = false;
+            isRescanning = false;
         }
 
         function toggleUnwatchedFilter() {

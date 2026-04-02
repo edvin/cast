@@ -92,6 +92,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/person/{person_id}", get(get_person))
         .route("/api/episodes/{episode_id}/prepare", post(prepare_episode))
         .route("/api/series/{series_id}/remux", post(remux_series))
+        .route("/api/rescan", post(rescan_library))
         .route("/api/series/{series_id}", delete(delete_series))
         .route("/api/episodes/watched", get(get_watched_episodes))
         .route("/api/episodes/{episode_id}", delete(delete_episode))
@@ -1388,6 +1389,51 @@ async fn get_watched_episodes(
     }
 
     Json(watched)
+}
+
+/// Trigger an immediate library rescan + TMDB metadata fetch
+async fn rescan_library(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.log("Manual rescan triggered");
+
+    match crate::library::Library::scan(&state.media_path) {
+        Ok(lib) => {
+            let series_count = lib.series.len();
+            let episode_count: usize = lib.series.values().map(|s| s.episodes.len()).sum();
+
+            // Fetch TMDB metadata for series missing it
+            if let Some(ref client) = state.tmdb {
+                let needs_meta: Vec<_> = lib.series.values()
+                    .filter(|s| !s.art.is_some() || !s.backdrop.is_some() || state.db.get_series_metadata(&s.id).is_none())
+                    .map(|s| (s.id.clone(), s.title.clone(), s.art.is_some(), s.backdrop.is_some(), s.tmdb_id_override))
+                    .collect();
+
+                if !needs_meta.is_empty() {
+                    let count = needs_meta.len();
+                    state.log(&format!("Fetching TMDB metadata for {count} series..."));
+                    let downloaded = crate::tmdb::fetch_all_metadata(client, &state.db, &state.media_path, needs_meta).await;
+                    if downloaded > 0 {
+                        state.log(&format!("Downloaded artwork for {downloaded} series"));
+                    }
+                    // Rescan again to pick up new art
+                    if let Ok(updated) = crate::library::Library::scan(&state.media_path) {
+                        *state.library.write().await = updated;
+                        state.log(&format!("Rescan complete: {series_count} series, {episode_count} episodes"));
+                        return Ok(Json(serde_json::json!({ "series": series_count, "episodes": episode_count })));
+                    }
+                }
+            }
+
+            *state.library.write().await = lib;
+            state.log(&format!("Rescan complete: {series_count} series, {episode_count} episodes"));
+            Ok(Json(serde_json::json!({ "series": series_count, "episodes": episode_count })))
+        }
+        Err(e) => {
+            state.log(&format!("Rescan failed: {e}"));
+            Err(ApiError::internal(&format!("Rescan failed: {e}")))
+        }
+    }
 }
 
 /// Delete a series and all its files

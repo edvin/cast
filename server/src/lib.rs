@@ -218,13 +218,12 @@ pub async fn start_server(
                 files
             };
 
-            if !files_to_remux.is_empty() {
-                remux_state.log(&format!("Background remux: {} files need conversion", files_to_remux.len()));
-            }
             if files_to_remux.is_empty() {
+                remux_state.log("All files are Apple TV ready");
                 tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                 continue;
             }
+            remux_state.log(&format!("{} files need conversion", files_to_remux.len()));
 
             for (source, target, stem) in &files_to_remux {
                 if target.exists() { continue; }

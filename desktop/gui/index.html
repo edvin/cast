@@ -200,6 +200,7 @@
             transition: all 0.15s;
         }
         .action-btn:hover { background: #252525; border-color: #555; color: #fff; }
+        .action-btn.active-filter { background: #0a84ff22; border-color: #0a84ff; color: #0a84ff; }
         .action-btn.danger:hover { border-color: #ff3b30; color: #ff3b30; }
         .action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
@@ -260,6 +261,40 @@
         .confirm-cancel:hover { background: #333; }
         .confirm-danger { background: #ff3b30; color: #fff; border-color: #ff3b30; }
         .confirm-danger:hover { background: #e0342c; }
+
+        /* Watched dialog */
+        .watched-overlay {
+            position: fixed; inset: 0; background: rgba(0,0,0,0.8);
+            display: none; z-index: 350; overflow-y: auto;
+        }
+        .watched-overlay.active { display: block; }
+        .watched-dialog {
+            max-width: 700px; margin: 30px auto; background: #1a1a1a;
+            border: 1px solid #333; border-radius: 12px; overflow: hidden;
+        }
+        .watched-header {
+            padding: 20px; border-bottom: 1px solid #222;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .watched-header h2 { font-size: 16px; color: #fff; }
+        .watched-list { padding: 8px 0; max-height: 400px; overflow-y: auto; }
+        .watched-item {
+            display: flex; align-items: center; gap: 12px; padding: 8px 20px;
+            transition: background 0.1s;
+        }
+        .watched-item:hover { background: #222; }
+        .watched-item input[type="checkbox"] {
+            width: 16px; height: 16px; accent-color: #0a84ff; flex-shrink: 0;
+        }
+        .watched-item-info { flex: 1; min-width: 0; }
+        .watched-item-title { font-size: 13px; color: #eee; }
+        .watched-item-meta { font-size: 11px; color: #666; }
+        .watched-item-actions { display: flex; gap: 6px; flex-shrink: 0; }
+        .watched-footer {
+            padding: 16px 20px; border-top: 1px solid #222;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .watched-footer-info { font-size: 12px; color: #888; }
     </style>
 </head>
 <body>
@@ -319,6 +354,21 @@
     <div style="display:flex; align-items:center; gap:10px; padding:6px 16px; background:#111; border-top:1px solid #222; font-size:11px; color:#666; flex-shrink:0;">
         <span id="statusActivity">Ready</span>
         <span style="margin-left:auto;" id="statusTools"></span>
+    </div>
+
+    <!-- Watched episodes dialog -->
+    <div class="watched-overlay" id="watchedOverlay">
+        <div class="watched-dialog">
+            <div class="watched-header">
+                <h2>🗑 Delete Watched Episodes</h2>
+                <button class="action-btn" onclick="closeWatched()">Close</button>
+            </div>
+            <div class="watched-list" id="watchedList"></div>
+            <div class="watched-footer">
+                <span class="watched-footer-info" id="watchedFooterInfo"></span>
+                <button class="action-btn danger" id="watchedDeleteBtn" onclick="deleteCheckedWatched()">Delete Selected</button>
+            </div>
+        </div>
     </div>
 
     <!-- Confirm dialog -->
@@ -387,6 +437,9 @@
             const logs = await invoke('get_logs');
             logContainer.innerHTML = '';
             logs.forEach(log => addLog(log.timestamp, log.message));
+            if (logs.length > 0) {
+                document.getElementById('statusActivity').textContent = logs[logs.length - 1].message;
+            }
         }
 
         listen('server-status', (e) => updateStatus(e.payload));
@@ -483,6 +536,7 @@
 
         // --- Library ---
         let lastSeriesData = null;
+        let showUnwatchedOnly = false;
 
         async function loadLibrary() {
             const grid = document.getElementById('seriesGrid');
@@ -509,12 +563,29 @@
                     <span class="summary-chip"><span class="num">${totalEps}</span> episodes</span>
                     <span class="summary-chip ${watchedEps > 0 ? 'ok' : ''}"><span class="num">${watchedEps}</span> watched</span>
                     <span class="summary-chip">${withMetadata}/${series.length} with metadata</span>
+                    <span style="margin-left:auto; display:flex; gap:8px;">
+                        <button class="action-btn ${showUnwatchedOnly ? 'active-filter' : ''}" onclick="toggleUnwatchedFilter()" id="filterBtn">
+                            ${showUnwatchedOnly ? '👁 Show All' : '👁 Unwatched Only'}
+                        </button>
+                        ${watchedEps > 0 ? '<button class="action-btn danger" onclick="showWatchedDialog()">🗑 Delete Watched</button>' : ''}
+                    </span>
                 `;
 
                 lastSeriesData = series;
+                const filtered = showUnwatchedOnly
+                    ? series.filter(s => s.watched_count < s.total_count)
+                    : series;
+
+                if (filtered.length === 0 && showUnwatchedOnly) {
+                    grid.style.display = 'none';
+                    empty.style.display = 'flex';
+                    empty.innerHTML = '<div style="font-size: 40px;">🎉</div><div>All caught up!</div><div style="font-size: 12px;">Every episode has been watched</div>';
+                    return;
+                }
+
                 grid.style.display = 'grid';
                 empty.style.display = 'none';
-                grid.innerHTML = series.map(s => `
+                grid.innerHTML = filtered.map(s => `
                     <div class="series-card" onclick="showDetail('${s.id}')">
                         ${s.has_backdrop
                             ? `<img class="series-card-image" src="${apiUrl('/api/series/' + s.id + '/backdrop')}" loading="lazy">`
@@ -714,6 +785,97 @@
                 btn.textContent = 'Failed';
                 btn.disabled = false;
             }
+        }
+
+        function toggleUnwatchedFilter() {
+            showUnwatchedOnly = !showUnwatchedOnly;
+            loadLibrary();
+        }
+
+        // --- Watched episodes dialog ---
+        let watchedEpisodes = [];
+
+        async function showWatchedDialog() {
+            try {
+                const resp = await fetch(apiUrl('/api/episodes/watched'));
+                watchedEpisodes = await resp.json();
+            } catch (e) {
+                showToast('Failed to load watched episodes', String(e), 'error');
+                return;
+            }
+
+            if (watchedEpisodes.length === 0) {
+                showToast('No watched episodes', '', 'success');
+                return;
+            }
+
+            const list = document.getElementById('watchedList');
+            list.innerHTML = watchedEpisodes.map((ep, i) => {
+                const sizeMB = (ep.size_bytes / 1048576).toFixed(0);
+                return `
+                    <div class="watched-item">
+                        <input type="checkbox" checked data-idx="${i}" onchange="updateWatchedFooter()">
+                        <div class="watched-item-info">
+                            <div class="watched-item-title">${esc(ep.series_title)} — ${esc(ep.episode_label)} — ${esc(ep.title)}</div>
+                            <div class="watched-item-meta">${sizeMB} MB · ${ep.format.toUpperCase()} · ${ep.percent_watched}% watched</div>
+                        </div>
+                        <div class="watched-item-actions">
+                            <button class="action-btn-sm" onclick="playEp('${esc(ep.series_title)}/${esc(ep.filename)}')">▶</button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            updateWatchedFooter();
+            document.getElementById('watchedOverlay').classList.add('active');
+        }
+
+        function updateWatchedFooter() {
+            const checkboxes = document.querySelectorAll('#watchedList input[type="checkbox"]');
+            let count = 0, totalSize = 0;
+            checkboxes.forEach(cb => {
+                if (cb.checked) {
+                    const ep = watchedEpisodes[parseInt(cb.dataset.idx)];
+                    count++;
+                    totalSize += ep.size_bytes;
+                }
+            });
+            const sizeMB = (totalSize / 1048576).toFixed(0);
+            const sizeGB = (totalSize / 1073741824).toFixed(1);
+            const sizeStr = totalSize > 1073741824 ? `${sizeGB} GB` : `${sizeMB} MB`;
+            document.getElementById('watchedFooterInfo').textContent = `${count} selected · ${sizeStr}`;
+            document.getElementById('watchedDeleteBtn').disabled = count === 0;
+            document.getElementById('watchedDeleteBtn').textContent = `Delete ${count} Episode${count !== 1 ? 's' : ''}`;
+        }
+
+        async function deleteCheckedWatched() {
+            const checkboxes = document.querySelectorAll('#watchedList input[type="checkbox"]:checked');
+            const ids = Array.from(checkboxes).map(cb => watchedEpisodes[parseInt(cb.dataset.idx)].episode_id);
+
+            if (ids.length === 0) return;
+
+            const ok = await showConfirm(
+                `Delete ${ids.length} episode${ids.length > 1 ? 's' : ''}?`,
+                'This will permanently remove the video files and related subtitles.',
+                `Delete ${ids.length}`
+            );
+            if (!ok) return;
+
+            let deleted = 0;
+            for (const id of ids) {
+                try {
+                    await fetch(apiUrl(`/api/episodes/${id}`), { method: 'DELETE' });
+                    deleted++;
+                } catch (e) {}
+            }
+
+            closeWatched();
+            showToast(`Deleted ${deleted} episode${deleted !== 1 ? 's' : ''}`, '', 'success');
+            setTimeout(loadLibrary, 1000);
+        }
+
+        function closeWatched() {
+            document.getElementById('watchedOverlay').classList.remove('active');
         }
 
         // --- Custom confirm ---

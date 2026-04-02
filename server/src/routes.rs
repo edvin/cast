@@ -93,6 +93,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/episodes/{episode_id}/prepare", post(prepare_episode))
         .route("/api/series/{series_id}/remux", post(remux_series))
         .route("/api/series/{series_id}", delete(delete_series))
+        .route("/api/episodes/watched", get(get_watched_episodes))
         .route("/api/episodes/{episode_id}", delete(delete_episode))
         .layer(cors)
         .with_state(state)
@@ -1298,6 +1299,83 @@ async fn remux_series(
     }
 
     Ok(Json(serde_json::json!({ "triggered": triggered })))
+}
+
+/// Get all watched episodes across all series
+#[derive(Serialize)]
+struct WatchedEpisode {
+    episode_id: String,
+    series_id: String,
+    series_title: String,
+    episode_label: String,
+    title: String,
+    filename: String,
+    size_bytes: u64,
+    percent_watched: u32,
+    format: String,
+}
+
+async fn get_watched_episodes(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<WatchedEpisode>> {
+    let lib = state.library.read().await;
+    let all_progress = state.db.get_all_progress_map();
+    let all_ep_meta = state.db.get_all_episode_metadata();
+
+    let mut watched = Vec::new();
+    for series in lib.series.values() {
+        for ep in &series.episodes {
+            if let Some(progress) = all_progress.get(&ep.id) {
+                if progress.completed {
+                    let tmdb_meta = ep.season_number
+                        .zip(ep.episode_number)
+                        .and_then(|(s, e)| all_ep_meta.get(&(series.id.clone(), s, e)));
+
+                    let title = tmdb_meta
+                        .and_then(|m| m.title.clone())
+                        .unwrap_or_else(|| ep.title.clone());
+
+                    let label = if let (Some(s), Some(e)) = (ep.season_number, ep.episode_number) {
+                        format!("S{s} E{e}")
+                    } else {
+                        format!("Episode {}", ep.index + 1)
+                    };
+
+                    let percent = if progress.duration_secs > 0.0 {
+                        ((progress.position_secs / progress.duration_secs) * 100.0).min(100.0) as u32
+                    } else {
+                        100
+                    };
+
+                    let format = std::path::Path::new(&ep.path)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("unknown")
+                        .to_lowercase();
+
+                    let filename = std::path::Path::new(&ep.path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    watched.push(WatchedEpisode {
+                        episode_id: ep.id.clone(),
+                        series_id: series.id.clone(),
+                        series_title: series.title.clone(),
+                        episode_label: label,
+                        title,
+                        filename,
+                        size_bytes: ep.size_bytes,
+                        percent_watched: percent,
+                        format,
+                    });
+                }
+            }
+        }
+    }
+
+    Json(watched)
 }
 
 /// Delete a series and all its files

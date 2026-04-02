@@ -1,6 +1,6 @@
 # Cast
 
-A local network media server and Apple TV client for streaming your video library. A Rust server indexes your media folders, fetches metadata and artwork from TMDB, and streams video with on-the-fly remuxing. A tvOS app discovers the server via Bonjour and provides a cinematic browsing and playback experience.
+A local network media server, Apple TV client, and desktop management app for streaming your video library. A Rust server indexes your media folders, fetches metadata and artwork from TMDB, and streams video with automatic MKV→MP4 remuxing. A tvOS app discovers the server via Bonjour and provides a cinematic browsing and playback experience. A Tauri desktop app provides a system tray server with library management, drag-and-drop import, and real-time monitoring.
 
 ## Architecture
 
@@ -85,7 +85,22 @@ cargo run --release
 
 The server starts on port 3456 and advertises itself via Bonjour.
 
-### 4. Install the tvOS app
+### 4. Desktop app (recommended for Windows/macOS)
+
+Download the installer from [Releases](../../releases):
+- **Windows**: `Cast Server Setup.exe`
+- **macOS**: `Cast Server.dmg`
+
+The desktop app includes:
+- System tray icon — server runs in the background
+- Library browser with artwork, episode details, and file status
+- Drag-and-drop import — drop video files to auto-organize into series folders
+- Remux management — convert MKV files to MP4 with one click
+- Delete watched episodes — bulk cleanup with file size info
+- Settings UI — configure media path, TMDB key, server name
+- Real-time log viewer
+
+### 5. Install the tvOS app
 
 Open `Cast/Cast.xcodeproj` in Xcode, select your Apple TV as the run destination, and deploy. The app auto-discovers the server on the local network.
 
@@ -171,7 +186,9 @@ Start-ScheduledTask -TaskName CastServer
 | GET | `/api/series/{id}/next` | Smart next episode recommendation |
 | GET | `/api/series/{id}/art` | Poster image |
 | GET | `/api/series/{id}/backdrop` | Backdrop image |
+| DELETE | `/api/series/{id}` | Delete series and all files |
 | DELETE | `/api/series/{id}/progress` | Reset all watch progress for a show |
+| POST | `/api/series/{id}/remux` | Trigger MKV→MP4 remux for all episodes |
 | GET | `/api/episodes/{id}/stream` | Video stream (byte-range, auto-remux) |
 | GET | `/api/episodes/{id}/thumbnail` | Episode thumbnail |
 | GET | `/api/episodes/{id}/progress` | Watch progress |
@@ -180,6 +197,9 @@ Start-ScheduledTask -TaskName CastServer
 | GET | `/api/episodes/{id}/credits` | Cast & guest stars (from TMDB, cached) |
 | GET | `/api/episodes/{id}/subtitles` | List available subtitle languages |
 | GET | `/api/episodes/{id}/subtitles/{lang}` | Subtitle file (SRT converted to WebVTT) |
+| DELETE | `/api/episodes/{id}` | Delete episode and related files |
+| POST | `/api/episodes/{id}/prepare` | Trigger on-demand remux, returns progress |
+| GET | `/api/episodes/watched` | All watched episodes with file info |
 | POST | `/api/metadata/fetch` | Trigger TMDB metadata refresh |
 
 All error responses return JSON: `{"error": "...", "code": 404, "detail": null}`
@@ -203,18 +223,23 @@ The tvOS app requires Xcode and an Apple Developer account. Build and deploy to 
 
 ```
 cast/
-├── server/              # Rust media server
+├── server/              # Rust media server (library crate + CLI binary)
 │   ├── src/
-│   │   ├── main.rs      # CLI, startup, periodic rescan
+│   │   ├── lib.rs       # Server library (start_server, AppState, background tasks)
+│   │   ├── main.rs      # CLI binary wrapper
 │   │   ├── library.rs   # Media directory scanner, filename parsing
-│   │   ├── db.rs        # SQLite (watch progress + metadata)
+│   │   ├── db.rs        # SQLite (watch progress + metadata + credits cache)
 │   │   ├── routes.rs    # HTTP API endpoints
 │   │   ├── tmdb.rs      # TMDB API client + metadata fetching
 │   │   ├── media.rs     # ffprobe/ffmpeg integration
 │   │   └── mdns.rs      # Bonjour/mDNS advertisement
 │   └── Cargo.toml
+├── desktop/             # Tauri 2 desktop app
+│   ├── src-tauri/       # Rust backend (tray, commands, file ops)
+│   └── gui/             # HTML/CSS/JS frontend
 ├── Cast/                # tvOS SwiftUI app (Xcode project)
-└── scripts/             # Windows install/uninstall scripts
+├── scripts/             # Windows install/uninstall scripts
+└── Cargo.toml           # Workspace root
 ```
 
 ## License

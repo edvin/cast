@@ -70,43 +70,25 @@ struct SeriesGridView: View {
                     }
 
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 60) {
+                        VStack(alignment: .leading, spacing: 24) {
                             // Top bar
                             HStack(spacing: 24) {
                                 Spacer()
-                                Button {
+                                TopBarButton(
+                                    icon: "arrow.triangle.2.circlepath",
+                                    label: isRefreshing ? "Refreshing..." : "Refresh",
+                                    isLoading: isRefreshing
+                                ) {
                                     Task { await refreshMetadata() }
-                                } label: {
-                                    HStack(spacing: 8) {
-                                        if isRefreshing {
-                                            ProgressView()
-                                                .scaleEffect(0.7)
-                                        } else {
-                                            Image(systemName: "arrow.triangle.2.circlepath")
-                                        }
-                                        Text(isRefreshing ? "Refreshing..." : "Refresh")
-                                            .font(.caption)
-                                    }
-                                    .foregroundStyle(Color(white: 0.6))
-                                    .padding(.horizontal, 20)
-                                    .padding(.vertical, 10)
                                 }
-                                .buttonStyle(NoChromeFocusButtonStyle())
                                 .disabled(isRefreshing)
 
-                                Button {
+                                TopBarButton(
+                                    icon: "server.rack",
+                                    label: "Change Server"
+                                ) {
                                     connection.disconnect()
-                                } label: {
-                                    HStack(spacing: 8) {
-                                        Image(systemName: "server.rack")
-                                        Text("Change Server")
-                                            .font(.caption)
-                                    }
-                                    .foregroundStyle(Color(white: 0.6))
-                                    .padding(.horizontal, 20)
-                                    .padding(.vertical, 10)
                                 }
-                                .buttonStyle(NoChromeFocusButtonStyle())
                             }
                             .padding(.horizontal, 80)
 
@@ -115,7 +97,7 @@ struct SeriesGridView: View {
                             }
                             librarySection
                         }
-                        .padding(.top, 30)
+                        .padding(.top, 0)
                         .padding(.bottom, 80)
                     }
                 }
@@ -222,6 +204,38 @@ struct NoChromeFocusButtonStyle: ButtonStyle {
     }
 }
 
+// MARK: - Top Bar Button (focusable with glass background)
+
+private struct TopBarButton: View {
+    let icon: String
+    let label: String
+    var isLoading: Bool = false
+    let action: () -> Void
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                if isLoading {
+                    ProgressView().scaleEffect(0.7)
+                } else {
+                    Image(systemName: icon)
+                }
+                Text(label).font(.caption)
+            }
+            .foregroundStyle(isFocused ? .white : Color(white: 0.8))
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+            .background(
+                Capsule()
+                    .fill(isFocused ? AnyShapeStyle(.thinMaterial) : AnyShapeStyle(Color.clear))
+            )
+        }
+        .buttonStyle(.plain)
+        .focused($isFocused)
+    }
+}
+
 // MARK: - Continue Watching Card
 
 private struct ContinueWatchingCard: View {
@@ -280,6 +294,10 @@ private struct ContinueWatchingCard: View {
         }
         .frame(width: 500, height: 280)
         .clipShape(RoundedRectangle(cornerRadius: 16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .strokeBorder(isFocused ? Color.white.opacity(0.5) : Color.clear, lineWidth: 3)
+        )
         .shadow(color: .black.opacity(isFocused ? 0.7 : 0.3), radius: isFocused ? 30 : 10, y: isFocused ? 15 : 5)
         .scaleEffect(isFocused ? 1.05 : 1.0)
         .animation(.easeInOut(duration: 0.2), value: isFocused)

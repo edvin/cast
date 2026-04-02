@@ -163,18 +163,59 @@ struct ProgressUpdate: Codable {
 // MARK: - Episode Credits
 
 struct CastMember: Codable, Identifiable {
+    let tmdbId: Int
     let name: String
     let character: String?
     let profileUrl: String?
     let order: Int
     let isGuest: Bool
 
-    var id: String { "\(name)-\(order)" }
+    var id: String { "\(tmdbId)-\(order)" }
 
     enum CodingKeys: String, CodingKey {
         case name, character, order
+        case tmdbId = "id"
         case profileUrl = "profile_url"
         case isGuest = "is_guest"
+    }
+}
+
+// MARK: - Person Detail
+
+struct PersonDetail: Codable {
+    let id: Int
+    let name: String
+    let biography: String?
+    let birthday: String?
+    let deathday: String?
+    let placeOfBirth: String?
+    let profileUrl: String?
+    let knownFor: [CreditRole]
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, biography, birthday, deathday
+        case placeOfBirth = "place_of_birth"
+        case profileUrl = "profile_url"
+        case knownFor = "known_for"
+    }
+}
+
+struct CreditRole: Codable, Identifiable {
+    let creditId: Int
+    let title: String
+    let character: String?
+    let mediaType: String
+    let posterUrl: String?
+    let rating: Double?
+    let year: String?
+
+    var id: String { "\(creditId)-\(title)" }
+
+    enum CodingKeys: String, CodingKey {
+        case title, character, rating, year
+        case creditId = "id"
+        case mediaType = "media_type"
+        case posterUrl = "poster_url"
     }
 }
 

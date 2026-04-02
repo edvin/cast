@@ -124,6 +124,12 @@ struct APIClient {
         let _ = try await URLSession.shared.data(for: request)
     }
 
+    // MARK: - People
+
+    func getPersonDetail(personId: Int) async throws -> PersonDetail {
+        try await request(baseURL.appendingPathComponent("api/person/\(personId)"))
+    }
+
     // MARK: - Credits
 
     func getEpisodeCredits(episodeId: String) async throws -> EpisodeCredits {

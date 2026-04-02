@@ -72,7 +72,9 @@ struct EpisodeCastView: View {
                 spacing: 50
             ) {
                 ForEach(members) { member in
-                    Button {} label: {
+                    NavigationLink {
+                        ActorDetailView(personId: member.tmdbId, client: client)
+                    } label: {
                         CastCard(member: member)
                     }
                     .buttonStyle(NoChromeFocusButtonStyle())

@@ -87,6 +87,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/series/{series_id}/progress", delete(delete_series_progress))
         .route("/api/metadata/fetch", post(fetch_metadata))
         .route("/api/episodes/{episode_id}/credits", get(get_episode_credits))
+        .route("/api/person/{person_id}", get(get_person))
         .with_state(state)
 }
 
@@ -1075,6 +1076,24 @@ async fn get_episode_credits(
     }
 
     Ok(Json(credits))
+}
+
+/// Get person detail with biography and filmography from TMDB
+async fn get_person(
+    State(state): State<Arc<AppState>>,
+    Path(person_id): Path<u64>,
+) -> ApiResult<Json<crate::tmdb::PersonDetail>> {
+    let tmdb_client = state.tmdb.as_ref().ok_or_else(|| {
+        ApiError::unavailable("TMDB API key not configured")
+    })?;
+
+    let person = tmdb_client
+        .get_person_detail(person_id)
+        .await
+        .map_err(|e| ApiError::internal(&format!("TMDB request failed: {e}")))?
+        .ok_or_else(|| ApiError::not_found("Person not found"))?;
+
+    Ok(Json(person))
 }
 
 #[cfg(test)]

@@ -111,6 +111,7 @@ struct TmdbCreditsResponse {
 
 #[derive(Debug, Deserialize)]
 struct TmdbCastMember {
+    id: u64,
     name: String,
     character: Option<String>,
     profile_path: Option<String>,
@@ -119,11 +120,67 @@ struct TmdbCastMember {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CastMember {
+    pub id: u64,
     pub name: String,
     pub character: Option<String>,
     pub profile_url: Option<String>,
     pub order: u32,
     pub is_guest: bool,
+}
+
+// --- Person detail types ---
+
+#[derive(Debug, Deserialize)]
+struct TmdbPersonDetail {
+    id: u64,
+    name: String,
+    biography: Option<String>,
+    birthday: Option<String>,
+    deathday: Option<String>,
+    place_of_birth: Option<String>,
+    profile_path: Option<String>,
+    combined_credits: Option<TmdbCombinedCredits>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TmdbCombinedCredits {
+    cast: Option<Vec<TmdbCreditRole>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TmdbCreditRole {
+    id: u64,
+    media_type: Option<String>,
+    title: Option<String>,       // for movies
+    name: Option<String>,        // for TV
+    character: Option<String>,
+    poster_path: Option<String>,
+    vote_average: Option<f64>,
+    release_date: Option<String>,    // movies
+    first_air_date: Option<String>,  // TV
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PersonDetail {
+    pub id: u64,
+    pub name: String,
+    pub biography: Option<String>,
+    pub birthday: Option<String>,
+    pub deathday: Option<String>,
+    pub place_of_birth: Option<String>,
+    pub profile_url: Option<String>,
+    pub known_for: Vec<CreditRole>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CreditRole {
+    pub id: u64,
+    pub title: String,
+    pub character: Option<String>,
+    pub media_type: String,
+    pub poster_url: Option<String>,
+    pub rating: Option<f64>,
+    pub year: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -275,6 +332,7 @@ impl TmdbClient {
             .into_iter()
             .enumerate()
             .map(|(i, c)| CastMember {
+                id: c.id,
                 name: c.name,
                 character: c.character,
                 profile_url: c.profile_path.map(|p| format!("{TMDB_IMAGE_BASE}/w185{p}")),
@@ -289,6 +347,7 @@ impl TmdbClient {
             .into_iter()
             .enumerate()
             .map(|(i, c)| CastMember {
+                id: c.id,
                 name: c.name,
                 character: c.character,
                 profile_url: c.profile_path.map(|p| format!("{TMDB_IMAGE_BASE}/w185{p}")),
@@ -298,6 +357,61 @@ impl TmdbClient {
             .collect();
 
         Ok(EpisodeCredits { cast, guest_stars })
+    }
+
+    /// Get person details with filmography
+    pub async fn get_person_detail(&self, person_id: u64) -> Result<Option<PersonDetail>, reqwest::Error> {
+        let resp = self
+            .http
+            .get(format!("{TMDB_BASE}/person/{person_id}"))
+            .query(&[
+                ("api_key", self.api_key.as_str()),
+                ("append_to_response", "combined_credits"),
+            ])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+
+        let detail: TmdbPersonDetail = resp.json().await?;
+
+        let mut known_for: Vec<CreditRole> = detail
+            .combined_credits
+            .and_then(|c| c.cast)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| {
+                let title = c.title.or(c.name).unwrap_or_default();
+                let media_type = c.media_type.unwrap_or_else(|| "unknown".to_string());
+                let year = c.release_date.or(c.first_air_date)
+                    .and_then(|d| d.get(..4).map(|s| s.to_string()));
+                CreditRole {
+                    id: c.id,
+                    title,
+                    character: c.character,
+                    media_type,
+                    poster_url: c.poster_path.map(|p| format!("{TMDB_IMAGE_BASE}/w185{p}")),
+                    rating: c.vote_average,
+                    year,
+                }
+            })
+            .collect();
+
+        // Sort by rating descending (best known roles first)
+        known_for.sort_by(|a, b| b.rating.partial_cmp(&a.rating).unwrap_or(std::cmp::Ordering::Equal));
+
+        Ok(Some(PersonDetail {
+            id: detail.id,
+            name: detail.name,
+            biography: detail.biography.filter(|b| !b.is_empty()),
+            birthday: detail.birthday,
+            deathday: detail.deathday,
+            place_of_birth: detail.place_of_birth,
+            profile_url: detail.profile_path.map(|p| format!("{TMDB_IMAGE_BASE}/w500{p}")),
+            known_for,
+        }))
     }
 
     /// Download an image from a URL and save it to a path

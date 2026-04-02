@@ -186,7 +186,9 @@ struct PlayerView: UIViewControllerRepresentable {
 
         nonisolated func playerViewControllerShouldDismiss(_ playerViewController: AVPlayerViewController) -> Bool {
             // Pause immediately so audio stops before the dismiss animation
-            playerViewController.player?.pause()
+            MainActor.assumeIsolated {
+                playerViewController.player?.pause()
+            }
             return true
         }
 
@@ -276,15 +278,14 @@ final class ExternalSubtitleViewController: UIViewController {
     }
 
     private func makeButton(title: String, language: String?) -> UIButton {
-        let button = UIButton(type: .system)
-        button.setTitle(title, for: .normal)
-        button.titleLabel?.font = .systemFont(ofSize: 28, weight: .medium)
+        var config = UIButton.Configuration.plain()
+        config.title = title
+        config.contentInsets = NSDirectionalEdgeInsets(top: 12, leading: 24, bottom: 12, trailing: 24)
         let isActive = (language == nil && activeLanguage == nil) || (language == activeLanguage)
-        button.tintColor = isActive ? .white : .gray
-        button.backgroundColor = isActive ? UIColor.white.withAlphaComponent(0.2) : .clear
-        button.layer.cornerRadius = 12
-        button.contentEdgeInsets = UIEdgeInsets(top: 12, left: 24, bottom: 12, right: 24)
-        button.tag = language.hashValue
+        config.baseForegroundColor = isActive ? .white : .gray
+        config.background.backgroundColor = isActive ? UIColor.white.withAlphaComponent(0.2) : .clear
+        config.background.cornerRadius = 12
+        let button = UIButton(configuration: config)
         button.addAction(UIAction { [weak self] _ in
             self?.selectSubtitle(language: language)
         }, for: .primaryActionTriggered)
@@ -298,18 +299,10 @@ final class ExternalSubtitleViewController: UIViewController {
         guard let player, let item = player.currentItem else { return }
 
         if let lang = language {
-            // Load external WebVTT subtitle
-            let url = client.subtitleURL(episodeId: episode.id, language: lang)
-            // Add as external subtitle using AVPlayerItem
-            let asset = AVURLAsset(url: url)
             Task {
-                // For external WebVTT, we need to set it up as a timed metadata
-                // The most reliable tvOS approach: use AVPlayerItemLegibleOutput
-                // For now, try the media selection approach
                 if let group = try? await item.asset.loadMediaSelectionGroup(for: .legible) {
-                    // Look for a matching external subtitle
                     let options = group.options.filter { option in
-                        option.locale?.languageCode == lang
+                        option.locale?.language.languageCode?.identifier == lang
                     }
                     if let option = options.first {
                         await MainActor.run {

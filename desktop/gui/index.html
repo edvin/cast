@@ -173,7 +173,24 @@
             display: flex; flex-direction: column; align-items: center; justify-content: center;
             height: 100%; color: #555; gap: 12px;
         }
-        .series-empty svg { width: 48px; height: 48px; fill: #444; }
+
+        .library-summary {
+            display: flex; gap: 16px; margin-bottom: 16px; flex-shrink: 0; align-items: center;
+        }
+        .summary-chip {
+            padding: 5px 12px; background: #1a1a1a; border: 1px solid #252525;
+            border-radius: 16px; font-size: 11px; color: #aaa;
+        }
+        .summary-chip .num { color: #fff; font-weight: 600; }
+        .summary-chip.warn { border-color: #ff950044; color: #ff9500; }
+        .summary-chip.ok { border-color: #34c75944; color: #34c759; }
+
+        .tab-badge {
+            display: inline-block; min-width: 16px; height: 16px; line-height: 16px;
+            text-align: center; font-size: 9px; font-weight: 700; color: #fff;
+            background: #ff3b30; border-radius: 8px; margin-left: 6px; padding: 0 4px;
+        }
+        .tab-badge.hidden { display: none; }
 
         /* Action buttons */
         .action-btn {
@@ -203,14 +220,15 @@
     </div>
 
     <div class="tabs">
-        <div class="tab" data-page="library">Library</div>
-        <div class="tab active" data-page="logs">Logs</div>
+        <div class="tab active" data-page="library">Library</div>
+        <div class="tab" data-page="logs">Logs <span class="tab-badge hidden" id="logBadge">0</span></div>
         <div class="tab" data-page="settings">Settings</div>
     </div>
 
     <div class="content">
         <!-- Library page -->
-        <div class="page" id="page-library">
+        <div class="page active" id="page-library">
+            <div class="library-summary" id="librarySummary"></div>
             <div id="seriesGrid" class="series-grid"></div>
             <div id="seriesEmpty" class="series-empty" style="display:none;">
                 <div style="font-size: 40px;">📺</div>
@@ -220,7 +238,7 @@
         </div>
 
         <!-- Logs page -->
-        <div class="page active" id="page-logs">
+        <div class="page" id="page-logs">
             <div class="stats" id="statsBar">
                 <div class="stat-card"><div class="label">Status</div><div class="value" id="statStatus">Starting...</div></div>
                 <div class="stat-card"><div class="label">Port</div><div class="value" id="statPort">—</div></div>
@@ -289,10 +307,6 @@
             logs.forEach(log => addLog(log.timestamp, log.message));
         }
 
-        listen('server-log', (e) => {
-            const now = new Date().toLocaleTimeString('en-GB', { hour12: false });
-            addLog(now, e.payload);
-        });
         listen('server-status', (e) => updateStatus(e.payload));
 
         function updateStatus(running, mediaPath) {
@@ -357,10 +371,43 @@
             finally { btn.disabled = false; btn.textContent = 'Save & Start Server'; }
         });
 
+        // --- Log badge ---
+        let logBadgeCount = 0;
+        let logsTabActive = false;
+
+        function updateLogBadge() {
+            const badge = document.getElementById('logBadge');
+            if (logBadgeCount > 0 && !logsTabActive) {
+                badge.textContent = logBadgeCount > 99 ? '99+' : logBadgeCount;
+                badge.classList.remove('hidden');
+            } else {
+                badge.classList.add('hidden');
+                logBadgeCount = 0;
+            }
+        }
+
+        // Track active tab for badge
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                logsTabActive = tab.dataset.page === 'logs';
+                if (logsTabActive) { logBadgeCount = 0; updateLogBadge(); }
+            });
+        });
+
+        // Increment badge on new logs when not on logs tab
+        listen('server-log', (e) => {
+            const now = new Date().toLocaleTimeString('en-GB', { hour12: false });
+            addLog(now, e.payload);
+            if (!logsTabActive) { logBadgeCount++; updateLogBadge(); }
+        });
+
         // --- Library ---
+        let lastSeriesData = null;
+
         async function loadLibrary() {
             const grid = document.getElementById('seriesGrid');
             const empty = document.getElementById('seriesEmpty');
+            const summary = document.getElementById('librarySummary');
             try {
                 const resp = await fetch(apiUrl('/api/series'));
                 if (!resp.ok) throw new Error('Server not responding');
@@ -369,9 +416,22 @@
                 if (series.length === 0) {
                     grid.style.display = 'none';
                     empty.style.display = 'flex';
+                    summary.innerHTML = '';
                     return;
                 }
 
+                // Build summary
+                const totalEps = series.reduce((a, s) => a + s.episode_count, 0);
+                const watchedEps = series.reduce((a, s) => a + s.watched_count, 0);
+                const withMetadata = series.filter(s => s.has_metadata).length;
+                summary.innerHTML = `
+                    <span class="summary-chip"><span class="num">${series.length}</span> series</span>
+                    <span class="summary-chip"><span class="num">${totalEps}</span> episodes</span>
+                    <span class="summary-chip ${watchedEps > 0 ? 'ok' : ''}"><span class="num">${watchedEps}</span> watched</span>
+                    <span class="summary-chip">${withMetadata}/${series.length} with metadata</span>
+                `;
+
+                lastSeriesData = series;
                 grid.style.display = 'grid';
                 empty.style.display = 'none';
                 grid.innerHTML = series.map(s => `
@@ -569,13 +629,19 @@
             }
         }
 
-        // Poll stats
+        // Polling
         setInterval(loadStats, 5000);
+        setInterval(() => {
+            const libTab = document.querySelector('[data-page="library"]');
+            if (libTab.classList.contains('active')) loadLibrary();
+        }, 30000);
 
         // Initial load
         loadLogs();
         loadStats();
         loadSettings();
+        // Load library after a short delay (server needs to start first)
+        setTimeout(loadLibrary, 2000);
     </script>
 </body>
 </html>

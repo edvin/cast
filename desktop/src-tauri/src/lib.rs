@@ -329,6 +329,23 @@ struct ToolStatus {
 }
 
 #[tauri::command]
+fn get_autostart(app_handle: tauri::AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app_handle.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_autostart(app_handle: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let manager = app_handle.autolaunch();
+    if enabled {
+        manager.enable().map_err(|e| e.to_string())
+    } else {
+        manager.disable().map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
 fn open_folder(state: tauri::State<'_, DesktopState>, series_title: String) -> Result<(), String> {
     let config = state.config.lock().unwrap().clone();
     let folder = std::path::Path::new(&config.media_path).join(&series_title);
@@ -373,6 +390,10 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(desktop_state)
         .invoke_handler(tauri::generate_handler![
             get_logs,
@@ -386,6 +407,8 @@ pub fn run() {
             play_file,
             open_folder,
             get_tools,
+            get_autostart,
+            set_autostart,
         ])
         .on_window_event(|window, event| {
             match event {

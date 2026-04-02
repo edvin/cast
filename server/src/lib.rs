@@ -233,12 +233,17 @@ pub async fn start_server(
                 if target.exists() { continue; }
 
                 let tmp_path = target.parent().unwrap().join(format!("{stem}.mp4.tmp"));
-                remux_state.log(&format!("Remuxing: {}", source.file_name().unwrap().to_string_lossy()));
+                let (video_codec, video_extra) = routes::detect_video_codec(source);
+                let action = if video_codec == "copy" { "Remuxing" } else { "Transcoding" };
+                remux_state.log(&format!("{action}: {}", source.file_name().unwrap().to_string_lossy()));
 
                 let source_clone = source.clone();
                 let tmp_clone = tmp_path.clone();
+                let vc = video_codec.to_string();
+                let ve = video_extra.to_string();
                 let result = tokio::task::spawn_blocking(move || {
-                    let (video_codec, video_extra) = routes::detect_video_codec(&source_clone);
+                    let video_codec = vc.as_str();
+                    let video_extra = ve.as_str();
                     let mut cmd = std::process::Command::new(media::ffmpeg_cmd());
                     cmd.arg("-hide_banner").arg("-loglevel").arg("warning")
                         .arg("-i").arg(&source_clone).arg("-c:v").arg(video_codec);
@@ -255,7 +260,7 @@ pub async fn start_server(
                 match result {
                     Ok(Ok(output)) if output.status.success() => {
                         if std::fs::rename(&tmp_path, target).is_ok() {
-                            remux_state.log(&format!("Remux complete: {}", target.file_name().unwrap().to_string_lossy()));
+                            remux_state.log(&format!("{action} complete: {}", target.file_name().unwrap().to_string_lossy()));
                             let is_streaming = remux_state.active_streams.lock()
                                 .map(|s| s.contains(stem)).unwrap_or(false);
                             if !is_streaming {
@@ -267,7 +272,7 @@ pub async fn start_server(
                     }
                     Ok(Ok(output)) => {
                         let stderr = String::from_utf8_lossy(&output.stderr);
-                        remux_state.log(&format!("Remux failed: {}", stderr.lines().next().unwrap_or("unknown error")));
+                        remux_state.log(&format!("{action} failed: {}", stderr.lines().next().unwrap_or("unknown error")));
                         let _ = std::fs::remove_file(&tmp_path);
                     }
                     _ => break,

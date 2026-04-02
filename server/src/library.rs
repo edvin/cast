@@ -318,6 +318,10 @@ impl Library {
 
         for entry in entries {
             let dir_name = entry.file_name().to_string_lossy().to_string();
+            // Skip hidden directories (.thumbnails, .remux, etc.)
+            if dir_name.starts_with('.') {
+                continue;
+            }
             let series_path = entry.path();
             let rel_path = dir_name.clone();
             let series_id = stable_id(&rel_path);

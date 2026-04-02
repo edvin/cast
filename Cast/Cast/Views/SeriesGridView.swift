@@ -72,24 +72,26 @@ struct SeriesGridView: View {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 24) {
                             // Top bar
-                            HStack(spacing: 24) {
+                            HStack(spacing: 20) {
                                 Spacer()
-                                TopBarButton(
-                                    icon: "arrow.triangle.2.circlepath",
-                                    label: isRefreshing ? "Refreshing..." : "Refresh",
-                                    isLoading: isRefreshing
-                                ) {
+                                Button {
                                     Task { await refreshMetadata() }
+                                } label: {
+                                    if isRefreshing {
+                                        ProgressView()
+                                    } else {
+                                        Image(systemName: "arrow.triangle.2.circlepath")
+                                    }
                                 }
                                 .disabled(isRefreshing)
 
-                                TopBarButton(
-                                    icon: "server.rack",
-                                    label: "Change Server"
-                                ) {
+                                Button {
                                     connection.disconnect()
+                                } label: {
+                                    Image(systemName: "server.rack")
                                 }
                             }
+                            .focusSection()
                             .padding(.horizontal, 80)
 
                             if !continueWatchingItems.isEmpty {
@@ -148,7 +150,7 @@ struct SeriesGridView: View {
 
     private var librarySection: some View {
         LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 220, maximum: 280), spacing: 50)],
+            columns: [GridItem(.adaptive(minimum: 260, maximum: 320), spacing: 50)],
             spacing: 60
         ) {
             ForEach(seriesList) { series in
@@ -201,38 +203,6 @@ struct NoChromeFocusButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .opacity(configuration.isPressed ? 0.7 : 1.0)
-    }
-}
-
-// MARK: - Top Bar Button (focusable with glass background)
-
-private struct TopBarButton: View {
-    let icon: String
-    let label: String
-    var isLoading: Bool = false
-    let action: () -> Void
-    @FocusState private var isFocused: Bool
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                if isLoading {
-                    ProgressView().scaleEffect(0.7)
-                } else {
-                    Image(systemName: icon)
-                }
-                Text(label).font(.caption)
-            }
-            .foregroundStyle(isFocused ? .white : Color(white: 0.8))
-            .padding(.horizontal, 20)
-            .padding(.vertical, 10)
-            .background(
-                Capsule()
-                    .fill(isFocused ? AnyShapeStyle(.thinMaterial) : AnyShapeStyle(Color.clear))
-            )
-        }
-        .buttonStyle(.plain)
-        .focused($isFocused)
     }
 }
 
@@ -294,9 +264,10 @@ private struct ContinueWatchingCard: View {
         }
         .frame(width: 500, height: 280)
         .clipShape(RoundedRectangle(cornerRadius: 16))
+        .padding(3)
         .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(isFocused ? Color.white.opacity(0.5) : Color.clear, lineWidth: 3)
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(isFocused ? Color.white.opacity(0.5) : Color.clear, lineWidth: 3)
         )
         .shadow(color: .black.opacity(isFocused ? 0.7 : 0.3), radius: isFocused ? 30 : 10, y: isFocused ? 15 : 5)
         .scaleEffect(isFocused ? 1.05 : 1.0)
@@ -345,7 +316,7 @@ private struct SeriesCard: View {
 
             VStack(spacing: 3) {
                 Text(series.title)
-                    .font(.caption)
+                    .font(.callout)
                     .lineLimit(1)
                     .foregroundStyle(isFocused ? .white : Color(white: 0.6))
                 if let year = series.year {

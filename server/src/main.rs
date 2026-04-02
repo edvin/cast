@@ -1,3 +1,6 @@
+// Hide the console window on Windows when running as a background service
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 mod db;
 mod library;
 mod mdns;
@@ -213,40 +216,41 @@ async fn main() {
                 let tmp_path = target.parent().unwrap().join(format!("{stem}.mp4.tmp"));
                 tracing::info!("Background remux: {:?}", source.file_name().unwrap());
 
-                let (video_codec, video_extra) = routes::detect_video_codec(source);
+                let source_clone = source.clone();
+                let tmp_clone = tmp_path.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let (video_codec, video_extra) = routes::detect_video_codec(&source_clone);
 
-                let mut cmd = std::process::Command::new("ffmpeg");
-                cmd.arg("-hide_banner")
-                    .arg("-loglevel").arg("warning")
-                    .arg("-i").arg(source)
-                    .arg("-c:v").arg(video_codec);
+                    let mut cmd = std::process::Command::new("ffmpeg");
+                    cmd.arg("-hide_banner")
+                        .arg("-loglevel").arg("warning")
+                        .arg("-i").arg(&source_clone)
+                        .arg("-c:v").arg(video_codec);
 
-                if video_codec != "copy" {
-                    for part in video_extra.split_whitespace() {
-                        cmd.arg(part);
+                    if video_codec != "copy" {
+                        for part in video_extra.split_whitespace() {
+                            cmd.arg(part);
+                        }
                     }
-                }
 
-                let output = cmd
-                    .arg("-c:a").arg("aac")
-                    .arg("-b:a").arg("192k")
-                    .arg("-ac").arg("2")
-                    .arg("-map").arg("0:v:0")
-                    .arg("-map").arg("0:a:0")
-                    .arg("-map").arg("0:s?")
-                    .arg("-c:s").arg("mov_text")
-                    .arg("-movflags").arg("+faststart")
-                    .arg("-y")
-                    .arg(&tmp_path)
-                    .output();
+                    cmd.arg("-c:a").arg("aac")
+                        .arg("-b:a").arg("192k")
+                        .arg("-ac").arg("2")
+                        .arg("-map").arg("0:v:0")
+                        .arg("-map").arg("0:a:0")
+                        .arg("-map").arg("0:s?")
+                        .arg("-c:s").arg("mov_text")
+                        .arg("-movflags").arg("+faststart")
+                        .arg("-y")
+                        .arg(&tmp_clone)
+                        .output()
+                }).await;
 
-                match output {
-                    Ok(result) if result.status.success() => {
-                        // Rename tmp → final
+                match result {
+                    Ok(Ok(output)) if output.status.success() => {
                         if std::fs::rename(&tmp_path, target).is_ok() {
                             tracing::info!("Background remux complete: {:?}", target.file_name().unwrap());
 
-                            // Delete original if not currently being streamed
                             let is_streaming = remux_state.active_streams.lock()
                                 .map(|s| s.contains(stem))
                                 .unwrap_or(false);
@@ -259,14 +263,18 @@ async fn main() {
                             }
                         }
                     }
-                    Ok(result) => {
-                        let stderr = String::from_utf8_lossy(&result.stderr);
+                    Ok(Ok(output)) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
                         tracing::warn!("Background remux failed for {:?}: {stderr}", source.file_name().unwrap());
                         let _ = std::fs::remove_file(&tmp_path);
                     }
+                    Ok(Err(e)) => {
+                        tracing::warn!("Failed to run ffmpeg: {e}");
+                        break;
+                    }
                     Err(e) => {
-                        tracing::warn!("Failed to run ffmpeg for background remux: {e}");
-                        break; // ffmpeg not available, stop trying
+                        tracing::warn!("Background remux task panicked: {e}");
+                        break;
                     }
                 }
 

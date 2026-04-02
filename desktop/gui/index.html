@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
     <title>Cast Server</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -292,6 +293,12 @@
         </div>
     </div>
 
+    <!-- Status bar -->
+    <div style="display:flex; align-items:center; gap:10px; padding:6px 16px; background:#111; border-top:1px solid #222; font-size:11px; color:#666; flex-shrink:0;">
+        <span id="statusActivity">Ready</span>
+        <span style="margin-left:auto;" id="statusTools"></span>
+    </div>
+
     <!-- Drop overlay -->
     <div class="drop-overlay" id="dropOverlay">
         <div class="drop-overlay-content">
@@ -434,11 +441,12 @@
             });
         });
 
-        // Increment badge on new logs when not on logs tab
+        // Increment badge on new logs when not on logs tab + update status bar
         listen('server-log', (e) => {
             const now = new Date().toLocaleTimeString('en-GB', { hour12: false });
             addLog(now, e.payload);
             if (!logsTabActive) { logBadgeCount++; updateLogBadge(); }
+            document.getElementById('statusActivity').textContent = e.payload;
         });
 
         // --- Library ---
@@ -777,11 +785,23 @@
             if (libTab.classList.contains('active')) loadLibrary();
         }, 30000);
 
+        // Load tool status
+        async function loadTools() {
+            try {
+                const tools = await invoke('get_tools');
+                const el = document.getElementById('statusTools');
+                el.innerHTML = `
+                    <span style="color:${tools.ffmpeg ? '#34c759' : '#ff3b30'}">ffmpeg ${tools.ffmpeg ? '✓' : '✗'}</span>
+                    <span style="margin-left:8px;color:${tools.ffprobe ? '#34c759' : '#ff3b30'}">ffprobe ${tools.ffprobe ? '✓' : '✗'}</span>
+                `;
+            } catch (e) {}
+        }
+
         // Initial load
         loadLogs();
         loadStats();
         loadSettings();
-        // Load library after a short delay (server needs to start first)
+        loadTools();
         setTimeout(loadLibrary, 2000);
     </script>
 </body>

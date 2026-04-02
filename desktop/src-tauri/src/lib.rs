@@ -315,6 +315,20 @@ fn ingest_files(state: tauri::State<'_, DesktopState>, file_paths: Vec<String>) 
 }
 
 #[tauri::command]
+fn get_tools() -> ToolStatus {
+    ToolStatus {
+        ffmpeg: cast_server::media::is_ffmpeg_available(),
+        ffprobe: cast_server::media::is_ffprobe_available(),
+    }
+}
+
+#[derive(serde::Serialize)]
+struct ToolStatus {
+    ffmpeg: bool,
+    ffprobe: bool,
+}
+
+#[tauri::command]
 fn play_file(state: tauri::State<'_, DesktopState>, file_path: String) -> Result<(), String> {
     let config = state.config.lock().unwrap().clone();
     let full_path = std::path::Path::new(&config.media_path).join(&file_path);
@@ -360,6 +374,7 @@ pub fn run() {
             ingest_file,
             ingest_files,
             play_file,
+            get_tools,
         ])
         .on_window_event(|window, event| {
             match event {

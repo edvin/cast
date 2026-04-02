@@ -696,7 +696,7 @@
                                             ${inProgress ? '<span class="in-progress">▶ ' + Math.round(ep.progress.position_secs / ep.progress.duration_secs * 100) + '%</span>' : ''}
                                             ${fmtClass === 'mkv' ? `<button class="action-btn-sm" onclick="event.stopPropagation(); prepareEp('${ep.id}', this)">Remux</button>` : ''}
                                             <div style="display:flex;gap:4px;margin-top:2px;">
-                                                <button class="action-btn-sm" onclick="event.stopPropagation(); playEp('${esc(detail.title)}/${esc(ep.filename)}')">▶ Play</button>
+                                                <button class="action-btn-sm" onclick="event.stopPropagation(); playEp('${esc(detail.folder_name || detail.title)}/${esc(ep.filename)}')">▶ Play</button>
                                                 <button class="action-btn-sm" style="color:#ff3b30;" onclick="event.stopPropagation(); deleteEp('${ep.id}', '${esc(ep.title)}', '${detail.id}')" title="Delete episode">🗑</button>
                                             </div>
                                         </div>
@@ -825,7 +825,7 @@
                             <div class="watched-item-meta">${sizeMB} MB · ${ep.format.toUpperCase()} · ${ep.percent_watched}% watched</div>
                         </div>
                         <div class="watched-item-actions">
-                            <button class="action-btn-sm" onclick="playEp('${esc(ep.series_title)}/${esc(ep.filename)}')">▶</button>
+                            <button class="action-btn-sm" onclick="playEp('${esc(ep.folder_name || ep.series_title)}/${esc(ep.filename)}')">▶</button>
                         </div>
                     </div>
                 `;

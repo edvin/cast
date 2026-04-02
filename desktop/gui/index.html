@@ -662,7 +662,7 @@
                             ${hasMkv ? `<button class="action-btn" onclick="remuxSeries('${detail.id}', this)">⚡ Remux All to MP4</button>` : ''}
                             <button class="action-btn" onclick="refreshMetadata('${detail.id}', this)">🔄 Refresh Metadata</button>
                             <button class="action-btn danger" onclick="resetProgress('${detail.id}', this)">↩ Reset Progress</button>
-                            <button class="action-btn" onclick="openSeriesFolder('${esc(detail.title)}')">📂 Open Folder</button>
+                            <button class="action-btn" onclick="openSeriesFolder('${esc(detail.folder_name || detail.title)}')">📂 Open Folder</button>
                             <button class="action-btn danger" onclick="deleteSeries('${detail.id}', '${esc(detail.title)}')">🗑 Delete Series</button>
                         </div>
 

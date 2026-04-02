@@ -46,9 +46,11 @@ struct SeriesGridView: View {
                                 continueWatchingSection
                             }
 
-                            // Filter toggle
-                            HStack {
-                                Spacer()
+                            librarySection
+                                .padding(.bottom, 40)
+
+                            // Actions at the bottom
+                            HStack(spacing: 20) {
                                 Button {
                                     showUnwatchedOnly.toggle()
                                 } label: {
@@ -57,17 +59,10 @@ struct SeriesGridView: View {
                                         Text(showUnwatchedOnly ? "Show All" : "Unwatched Only")
                                             .font(.caption)
                                     }
-                                    .foregroundStyle(showUnwatchedOnly ? .blue : Color(white: 0.6))
                                 }
-                            }
-                            .padding(.horizontal, 80)
 
-                            librarySection
-                                .padding(.bottom, 40)
-
-                            // Actions at the bottom
-                            HStack(spacing: 20) {
                                 Spacer()
+
                                 Button {
                                     Task { await refreshMetadata() }
                                 } label: {

@@ -105,6 +105,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 struct SeriesListItem {
     id: String,
     title: String,
+    folder_name: String,
     episode_count: usize,
     has_art: bool,
     has_backdrop: bool,
@@ -121,6 +122,7 @@ struct SeriesListItem {
 struct SeriesDetail {
     id: String,
     title: String,
+    folder_name: String,
     has_art: bool,
     has_backdrop: bool,
     overview: Option<String>,
@@ -292,6 +294,7 @@ async fn list_series(State(state): State<Arc<AppState>>) -> Json<Vec<SeriesListI
             SeriesListItem {
                 id: s.id.clone(),
                 title: meta.and_then(|m| m.title.clone()).unwrap_or_else(|| s.title.clone()),
+                folder_name: s.title.clone(),
                 episode_count: s.episodes.len(),
                 has_art: s.art.is_some(),
                 has_backdrop: s.backdrop.is_some(),
@@ -337,6 +340,7 @@ async fn get_series(
             .as_ref()
             .and_then(|m| m.title.clone())
             .unwrap_or_else(|| series.title.clone()),
+        folder_name: series.title.clone(),
         has_art: series.art.is_some(),
         has_backdrop: series.backdrop.is_some(),
         overview: meta.as_ref().and_then(|m| m.overview.clone()),
@@ -552,7 +556,7 @@ pub fn needs_remux(path: &std::path::Path) -> bool {
 /// Check if the video stream needs transcoding (HEVC 10-bit, VP9, etc.)
 /// Returns ("copy", ...) for compatible codecs, ("libx264", ...) for incompatible ones.
 pub fn detect_video_codec(path: &std::path::Path) -> (&'static str, &'static str) {
-    let output = std::process::Command::new("ffprobe")
+    let output = std::process::Command::new(crate::media::ffprobe_cmd())
         .arg("-v").arg("quiet")
         .arg("-select_streams").arg("v:0")
         .arg("-show_entries").arg("stream=codec_name,pix_fmt")
@@ -709,7 +713,7 @@ async fn stream_remuxed(
     let (video_codec, video_extra) = detect_video_codec(&file_path);
     tracing::info!("Streaming+caching {:?} (video: {})", file_path.file_name().unwrap(), video_codec);
 
-    let mut cmd = std::process::Command::new("ffmpeg");
+    let mut cmd = std::process::Command::new(crate::media::ffmpeg_cmd());
     cmd.arg("-hide_banner")
         .arg("-loglevel").arg("warning")
         .arg("-i").arg(&file_path)
@@ -1194,7 +1198,7 @@ async fn prepare_episode(
         let (video_codec, video_extra) = detect_video_codec(&file_path_clone);
         tracing::info!("On-demand remux: {:?} (video: {video_codec})", file_path_clone.file_name().unwrap());
 
-        let mut cmd = std::process::Command::new("ffmpeg");
+        let mut cmd = std::process::Command::new(crate::media::ffmpeg_cmd());
         cmd.arg("-hide_banner").arg("-loglevel").arg("warning")
             .arg("-i").arg(&file_path_clone).arg("-c:v").arg(video_codec);
         if video_codec != "copy" {
@@ -1267,7 +1271,7 @@ async fn remux_series(
                     tokio::task::spawn_blocking(move || {
                         let (video_codec, video_extra) = detect_video_codec(&ep_path_clone);
                         tracing::info!("Batch remux: {:?} (video: {video_codec})", ep_path_clone.file_name().unwrap());
-                        let mut cmd = std::process::Command::new("ffmpeg");
+                        let mut cmd = std::process::Command::new(crate::media::ffmpeg_cmd());
                         cmd.arg("-hide_banner").arg("-loglevel").arg("warning")
                             .arg("-i").arg(&ep_path_clone).arg("-c:v").arg(video_codec);
                         if video_codec != "copy" {
@@ -1323,7 +1327,13 @@ async fn get_watched_episodes(
     let all_ep_meta = state.db.get_all_episode_metadata();
 
     let mut watched = Vec::new();
+    let all_series_meta = state.db.get_all_series_metadata();
+
     for series in lib.series.values() {
+        let display_title = all_series_meta.get(&series.id)
+            .and_then(|m| m.title.clone())
+            .unwrap_or_else(|| series.title.clone());
+
         for ep in &series.episodes {
             if let Some(progress) = all_progress.get(&ep.id) {
                 if progress.completed {
@@ -1362,7 +1372,7 @@ async fn get_watched_episodes(
                     watched.push(WatchedEpisode {
                         episode_id: ep.id.clone(),
                         series_id: series.id.clone(),
-                        series_title: series.title.clone(),
+                        series_title: display_title.clone(),
                         episode_label: label,
                         title,
                         filename,

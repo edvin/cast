@@ -235,7 +235,7 @@ pub async fn start_server(
                 let tmp_clone = tmp_path.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     let (video_codec, video_extra) = routes::detect_video_codec(&source_clone);
-                    let mut cmd = std::process::Command::new("ffmpeg");
+                    let mut cmd = std::process::Command::new(media::ffmpeg_cmd());
                     cmd.arg("-hide_banner").arg("-loglevel").arg("warning")
                         .arg("-i").arg(&source_clone).arg("-c:v").arg(video_codec);
                     if video_codec != "copy" {

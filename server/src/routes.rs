@@ -91,6 +91,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/episodes/{episode_id}/credits", get(get_episode_credits))
         .route("/api/person/{person_id}", get(get_person))
         .route("/api/episodes/{episode_id}/prepare", post(prepare_episode))
+        .route("/api/series/{series_id}/remux", post(remux_series))
         .layer(cors)
         .with_state(state)
 }
@@ -142,6 +143,14 @@ struct EpisodeItem {
     still_url: Option<String>,
     subtitle_languages: Vec<String>,
     progress: Option<EpisodeProgress>,
+    /// File format: "mp4", "mkv", "avi", etc.
+    format: String,
+    /// Video codec: "h264", "hevc", etc.
+    video_codec: Option<String>,
+    /// Resolution: "1080p", "720p", "4K", etc.
+    resolution: Option<String>,
+    /// Original filename
+    filename: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -236,6 +245,18 @@ fn build_episode_item_cached(
         still_url: tmdb_meta.and_then(|m| m.still_url.clone()),
         subtitle_languages: ep.subtitles.iter().map(|s| s.language.clone()).collect(),
         progress,
+        format: std::path::Path::new(&ep.path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("unknown")
+            .to_lowercase(),
+        video_codec: None, // populated on demand
+        resolution: None,  // populated on demand
+        filename: std::path::Path::new(&ep.path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string(),
     }
 }
 
@@ -1208,6 +1229,73 @@ async fn prepare_episode(
     });
 
     Ok(Json(PrepareResponse { ready: false, needs_remux: true, remuxing: true, progress_percent: Some(0) }))
+}
+
+/// Trigger remux for all MKV episodes in a series
+async fn remux_series(
+    State(state): State<Arc<AppState>>,
+    Path(series_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let lib = state.library.read().await;
+    let series = lib.find_series(&series_id)
+        .ok_or_else(|| ApiError::not_found("Series not found"))?;
+
+    let mut triggered = 0;
+    for ep in &series.episodes {
+        let ep_path = state.media_path.join(&ep.path);
+        if needs_remux(&ep_path) {
+            let stem = ep_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+            let mp4_path = ep_path.parent().unwrap().join(format!("{stem}.mp4"));
+            if !mp4_path.exists() {
+                // Trigger prepare for each episode
+                let tmp_path = ep_path.parent().unwrap().join(format!("{stem}.mp4.tmp"));
+                if !tmp_path.exists() {
+                    if let Ok(mut set) = state.remuxing.lock() {
+                        if set.contains(&stem) { continue; }
+                        set.insert(stem.clone());
+                    }
+
+                    let ep_path_clone = ep_path.clone();
+                    let tmp_clone = tmp_path.clone();
+                    let mp4_clone = mp4_path.clone();
+                    let remuxing_ref = state.remuxing.clone();
+                    let stem_clone = stem.clone();
+
+                    tokio::task::spawn_blocking(move || {
+                        let (video_codec, video_extra) = detect_video_codec(&ep_path_clone);
+                        tracing::info!("Batch remux: {:?} (video: {video_codec})", ep_path_clone.file_name().unwrap());
+                        let mut cmd = std::process::Command::new("ffmpeg");
+                        cmd.arg("-hide_banner").arg("-loglevel").arg("warning")
+                            .arg("-i").arg(&ep_path_clone).arg("-c:v").arg(video_codec);
+                        if video_codec != "copy" {
+                            for part in video_extra.split_whitespace() { cmd.arg(part); }
+                        }
+                        let output = cmd
+                            .arg("-c:a").arg("aac").arg("-b:a").arg("192k").arg("-ac").arg("2")
+                            .arg("-map").arg("0:v:0").arg("-map").arg("0:a:0")
+                            .arg("-map").arg("0:s?").arg("-c:s").arg("mov_text")
+                            .arg("-movflags").arg("+faststart").arg("-f").arg("mp4")
+                            .arg("-y").arg(&tmp_clone)
+                            .output();
+                        match output {
+                            Ok(result) if result.status.success() => {
+                                if std::fs::rename(&tmp_clone, &mp4_clone).is_ok() {
+                                    tracing::info!("Batch remux complete: {:?}", mp4_clone.file_name().unwrap());
+                                    let _ = std::fs::remove_file(&ep_path_clone);
+                                }
+                            }
+                            _ => { let _ = std::fs::remove_file(&tmp_clone); }
+                        }
+                        if let Ok(mut set) = remuxing_ref.lock() { set.remove(&stem_clone); }
+                    });
+
+                    triggered += 1;
+                }
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({ "triggered": triggered })))
 }
 
 /// Get person detail with biography and filmography from TMDB

@@ -174,6 +174,23 @@
             height: 100%; color: #555; gap: 12px;
         }
         .series-empty svg { width: 48px; height: 48px; fill: #444; }
+
+        /* Action buttons */
+        .action-btn {
+            padding: 6px 14px; background: #1a1a1a; border: 1px solid #333;
+            border-radius: 6px; color: #ccc; font-size: 12px; cursor: pointer;
+            transition: all 0.15s;
+        }
+        .action-btn:hover { background: #252525; border-color: #555; color: #fff; }
+        .action-btn.danger:hover { border-color: #ff3b30; color: #ff3b30; }
+        .action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        .action-btn-sm {
+            padding: 3px 8px; background: #1a1a1a; border: 1px solid #333;
+            border-radius: 4px; color: #aaa; font-size: 10px; cursor: pointer;
+        }
+        .action-btn-sm:hover { background: #252525; color: #fff; }
+        .action-btn-sm:disabled { opacity: 0.4; cursor: not-allowed; }
     </style>
 </head>
 <body>
@@ -392,6 +409,16 @@
                 const resp = await fetch(apiUrl(`/api/series/${seriesId}`));
                 const detail = await resp.json();
 
+                const hasMkv = detail.episodes.some(ep => ep.format !== 'mp4');
+                const formatSummary = (() => {
+                    const formats = {};
+                    detail.episodes.forEach(ep => {
+                        const f = ep.format.toUpperCase();
+                        formats[f] = (formats[f] || 0) + 1;
+                    });
+                    return Object.entries(formats).map(([k, v]) => `${v} ${k}`).join(', ');
+                })();
+
                 content.innerHTML = `
                     <div class="detail-hero" style="position: relative;">
                         <button class="detail-close" onclick="closeDetail()">✕</button>
@@ -406,18 +433,28 @@
                             <div class="detail-hero-title">${esc(detail.title)}</div>
                             <div class="detail-hero-meta">
                                 ${detail.year ? detail.year : ''}
-                                ${detail.genres ? `· ${esc(detail.genres)}` : ''}
-                                ${detail.rating ? `· <span class="rating">★ ${detail.rating.toFixed(1)}</span>` : ''}
+                                ${detail.genres ? ` · ${esc(detail.genres)}` : ''}
+                                ${detail.rating ? ` · <span class="rating">★ ${detail.rating.toFixed(1)}</span>` : ''}
+                                · ${formatSummary}
                             </div>
                         </div>
                     </div>
                     <div class="detail-body">
                         ${detail.overview ? `<div class="detail-overview">${esc(detail.overview)}</div>` : ''}
+
+                        <div style="display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap;">
+                            ${hasMkv ? `<button class="action-btn" onclick="remuxSeries('${detail.id}', this)">⚡ Remux All to MP4</button>` : ''}
+                            <button class="action-btn" onclick="refreshMetadata('${detail.id}', this)">🔄 Refresh Metadata</button>
+                            <button class="action-btn danger" onclick="resetProgress('${detail.id}', this)">↩ Reset Watch Progress</button>
+                        </div>
+
                         <div class="episode-list">
                             ${detail.episodes.map(ep => {
-                                const ext = guessFormat(ep);
                                 const watched = ep.progress?.completed;
                                 const inProgress = ep.progress && !ep.progress.completed;
+                                const fmt = ep.format.toUpperCase();
+                                const fmtClass = fmt === 'MP4' ? 'mp4' : 'mkv';
+                                const sizeMB = (ep.size_bytes / 1048576).toFixed(0);
                                 return `
                                     <div class="episode-row">
                                         ${ep.still_url
@@ -431,11 +468,15 @@
                                             <div class="ep-meta">
                                                 ${ep.runtime_minutes ? ep.runtime_minutes + ' min' : ''}
                                                 ${ep.air_date ? ' · ' + ep.air_date : ''}
+                                                · ${sizeMB} MB
+                                                · <span style="font-size:9px;color:#666;">${esc(ep.filename)}</span>
                                             </div>
                                         </div>
-                                        <div class="ep-status">
+                                        <div class="ep-status" style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
+                                            <span class="format-badge ${fmtClass}">${fmt}</span>
                                             ${watched ? '<span class="watched">✓ Watched</span>' : ''}
                                             ${inProgress ? '<span class="in-progress">▶ ' + Math.round(ep.progress.position_secs / ep.progress.duration_secs * 100) + '%</span>' : ''}
+                                            ${fmtClass === 'mkv' ? `<button class="action-btn-sm" onclick="event.stopPropagation(); prepareEp('${ep.id}', this)">Remux</button>` : ''}
                                         </div>
                                     </div>
                                 `;
@@ -448,11 +489,6 @@
             } catch (e) {
                 console.error('Failed to load detail:', e);
             }
-        }
-
-        function guessFormat(ep) {
-            // We don't have the filename in the API, but we can check if it has subtitles embedded
-            return 'mp4'; // default assumption
         }
 
         function closeDetail() {
@@ -468,6 +504,70 @@
         document.getElementById('detailOverlay').addEventListener('click', (e) => {
             if (e.target === e.currentTarget) closeDetail();
         });
+
+        // --- Actions ---
+        async function remuxSeries(seriesId, btn) {
+            btn.disabled = true;
+            btn.textContent = '⚡ Remuxing...';
+            try {
+                const resp = await fetch(apiUrl(`/api/series/${seriesId}/remux`), { method: 'POST' });
+                const result = await resp.json();
+                btn.textContent = `⚡ ${result.triggered} triggered`;
+                setTimeout(() => { btn.textContent = '⚡ Remux All to MP4'; btn.disabled = false; }, 3000);
+            } catch (e) {
+                btn.textContent = '⚡ Failed';
+                setTimeout(() => { btn.textContent = '⚡ Remux All to MP4'; btn.disabled = false; }, 2000);
+            }
+        }
+
+        async function refreshMetadata(seriesId, btn) {
+            btn.disabled = true;
+            btn.textContent = '🔄 Refreshing...';
+            try {
+                await fetch(apiUrl('/api/metadata/fetch'), { method: 'POST' });
+                btn.textContent = '🔄 Done!';
+                setTimeout(() => showDetail(seriesId), 1500);
+            } catch (e) {
+                btn.textContent = '🔄 Failed';
+            }
+            setTimeout(() => { btn.textContent = '🔄 Refresh Metadata'; btn.disabled = false; }, 3000);
+        }
+
+        async function resetProgress(seriesId, btn) {
+            if (!confirm('Reset all watch progress for this series?')) return;
+            btn.disabled = true;
+            try {
+                await fetch(apiUrl(`/api/series/${seriesId}/progress`), { method: 'DELETE' });
+                btn.textContent = '↩ Reset!';
+                setTimeout(() => showDetail(seriesId), 1000);
+            } catch (e) {
+                btn.textContent = '↩ Failed';
+            }
+            setTimeout(() => { btn.textContent = '↩ Reset Watch Progress'; btn.disabled = false; }, 2000);
+        }
+
+        async function prepareEp(episodeId, btn) {
+            btn.disabled = true;
+            btn.textContent = 'Remuxing...';
+            try {
+                await fetch(apiUrl(`/api/episodes/${episodeId}/prepare`), { method: 'POST' });
+                // Poll for completion
+                const poll = setInterval(async () => {
+                    const resp = await fetch(apiUrl(`/api/episodes/${episodeId}/prepare`), { method: 'POST' });
+                    const status = await resp.json();
+                    if (status.ready) {
+                        clearInterval(poll);
+                        btn.textContent = '✓ Done';
+                        btn.style.color = '#34c759';
+                    } else if (status.progress_percent !== null) {
+                        btn.textContent = `${status.progress_percent}%`;
+                    }
+                }, 3000);
+            } catch (e) {
+                btn.textContent = 'Failed';
+                btn.disabled = false;
+            }
+        }
 
         // Poll stats
         setInterval(loadStats, 5000);

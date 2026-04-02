@@ -221,7 +221,10 @@ pub fn run() {
             }
         })
         .setup(move |app| {
-            tray::setup_tray(app.handle())?;
+            match tray::setup_tray(app.handle()) {
+                Ok(_) => eprintln!("[Cast] Tray icon created successfully"),
+                Err(e) => eprintln!("[Cast] ERROR creating tray icon: {e}"),
+            }
 
             // Auto-start server if media path is configured
             if !config.media_path.is_empty() {

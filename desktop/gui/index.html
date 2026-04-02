@@ -18,7 +18,6 @@
             user-select: none;
         }
 
-        /* Header */
         .header {
             display: flex;
             align-items: center;
@@ -28,202 +27,153 @@
             border-bottom: 1px solid #222;
             -webkit-app-region: drag;
         }
-
-        .header-left {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-
-        .status-dot {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            background: #444;
-            transition: background 0.3s;
-        }
-
+        .header-left { display: flex; align-items: center; gap: 12px; }
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #444; transition: background 0.3s; }
         .status-dot.running { background: #34c759; box-shadow: 0 0 8px #34c75966; }
         .status-dot.stopped { background: #ff3b30; }
+        .header h1 { font-size: 16px; font-weight: 600; color: #fff; }
+        .header-info { font-size: 12px; color: #888; }
 
-        .header h1 {
-            font-size: 16px;
-            font-weight: 600;
-            color: #fff;
-        }
-
-        .header-info {
-            font-size: 12px;
-            color: #888;
-        }
-
-        /* Tabs */
-        .tabs {
-            display: flex;
-            background: #161616;
-            border-bottom: 1px solid #222;
-        }
-
+        .tabs { display: flex; background: #161616; border-bottom: 1px solid #222; }
         .tab {
-            padding: 10px 24px;
-            font-size: 13px;
-            color: #888;
-            cursor: pointer;
-            border-bottom: 2px solid transparent;
-            transition: all 0.2s;
-            -webkit-app-region: no-drag;
+            padding: 10px 24px; font-size: 13px; color: #888; cursor: pointer;
+            border-bottom: 2px solid transparent; transition: all 0.2s;
         }
-
         .tab:hover { color: #ccc; }
         .tab.active { color: #fff; border-bottom-color: #0a84ff; }
 
-        /* Content */
-        .content {
-            flex: 1;
-            overflow: hidden;
-            position: relative;
-        }
-
-        .page {
-            position: absolute;
-            inset: 0;
-            padding: 24px;
-            overflow-y: auto;
-            display: none;
-            flex-direction: column;
-        }
-
+        .content { flex: 1; overflow: hidden; position: relative; }
+        .page { position: absolute; inset: 0; padding: 24px; overflow-y: auto; display: none; flex-direction: column; }
         .page.active { display: flex !important; }
 
         /* Log viewer */
         .log-container {
-            background: #111;
-            border: 1px solid #222;
-            border-radius: 8px;
-            padding: 16px 16px 24px 16px;
-            flex: 1;
-            min-height: 0;
-            overflow-y: auto;
-            font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
-            font-size: 12px;
-            line-height: 1.6;
+            background: #111; border: 1px solid #222; border-radius: 8px;
+            padding: 16px 16px 24px 16px; flex: 1; min-height: 0; overflow-y: auto;
+            font-family: 'SF Mono', 'Menlo', 'Consolas', monospace; font-size: 12px; line-height: 1.6;
         }
+        .log-entry { display: flex; gap: 12px; }
+        .log-time { color: #555; flex-shrink: 0; }
+        .log-msg { color: #ccc; word-break: break-all; }
+        .log-entry:last-child .log-msg { color: #fff; }
 
-        .log-entry {
-            display: flex;
-            gap: 12px;
-        }
-
-        .log-time {
-            color: #555;
-            flex-shrink: 0;
-        }
-
-        .log-msg {
-            color: #ccc;
-            word-break: break-all;
-        }
-
-        .log-entry:last-child .log-msg {
-            color: #fff;
-        }
+        /* Stats */
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; flex-shrink: 0; }
+        .stat-card { background: #161616; border: 1px solid #222; border-radius: 8px; padding: 16px; }
+        .stat-card .label { font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+        .stat-card .value { font-size: 18px; font-weight: 600; color: #fff; }
 
         /* Settings */
-        .settings-form {
-            max-width: 500px;
-        }
-
-        .field {
-            margin-bottom: 20px;
-        }
-
-        .field label {
-            display: block;
-            font-size: 12px;
-            color: #888;
-            margin-bottom: 6px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-
-        .field input {
-            width: 100%;
-            padding: 10px 14px;
-            background: #1a1a1a;
-            border: 1px solid #333;
-            border-radius: 6px;
-            color: #fff;
-            font-size: 14px;
-            outline: none;
-            transition: border-color 0.2s;
-        }
-
-        .field input:focus {
-            border-color: #0a84ff;
-        }
-
-        .field input::placeholder {
-            color: #555;
-        }
-
-        .save-btn {
-            padding: 10px 24px;
-            background: #0a84ff;
-            color: #fff;
-            border: none;
-            border-radius: 6px;
-            font-size: 14px;
-            cursor: pointer;
-            transition: background 0.2s;
-        }
-
+        .settings-form { max-width: 500px; }
+        .field { margin-bottom: 20px; }
+        .field label { display: block; font-size: 12px; color: #888; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .field input { width: 100%; padding: 10px 14px; background: #1a1a1a; border: 1px solid #333; border-radius: 6px; color: #fff; font-size: 14px; outline: none; }
+        .field input:focus { border-color: #0a84ff; }
+        .field input::placeholder { color: #555; }
+        .save-btn { padding: 10px 24px; background: #0a84ff; color: #fff; border: none; border-radius: 6px; font-size: 14px; cursor: pointer; }
         .save-btn:hover { background: #0070e0; }
         .save-btn:disabled { background: #333; color: #666; cursor: not-allowed; }
-
-        .save-msg {
-            margin-left: 12px;
-            font-size: 13px;
-            color: #34c759;
-            opacity: 0;
-            transition: opacity 0.3s;
-        }
-
+        .save-msg { margin-left: 12px; font-size: 13px; color: #34c759; opacity: 0; transition: opacity 0.3s; }
         .save-msg.show { opacity: 1; }
+        .note { font-size: 12px; color: #555; margin-top: 20px; }
 
-        /* Status cards */
-        .stats {
+        /* Series browser */
+        .series-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 16px;
-            margin-bottom: 24px;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 20px;
+            padding-bottom: 24px;
         }
-
-        .stat-card {
+        .series-card {
             background: #161616;
             border: 1px solid #222;
-            border-radius: 8px;
-            padding: 16px;
+            border-radius: 12px;
+            overflow: hidden;
+            cursor: pointer;
+            transition: border-color 0.2s, transform 0.2s;
         }
+        .series-card:hover {
+            border-color: #444;
+            transform: translateY(-2px);
+        }
+        .series-card-image {
+            width: 100%;
+            height: 160px;
+            object-fit: cover;
+            background: #111;
+        }
+        .series-card-body { padding: 14px; }
+        .series-card-title { font-size: 14px; font-weight: 600; color: #fff; margin-bottom: 4px; }
+        .series-card-meta { font-size: 11px; color: #888; display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+        .series-card-meta .rating { color: #f5c518; }
+        .series-card-overview { font-size: 11px; color: #666; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .series-card-episodes { font-size: 11px; color: #0a84ff; margin-top: 8px; }
 
-        .stat-card .label {
-            font-size: 11px;
-            color: #666;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin-bottom: 4px;
+        /* Series detail overlay */
+        .detail-overlay {
+            position: fixed; inset: 0; background: rgba(0,0,0,0.85);
+            display: none; z-index: 100; overflow-y: auto;
         }
+        .detail-overlay.active { display: block; }
+        .detail-content {
+            max-width: 800px; margin: 40px auto; background: #161616;
+            border-radius: 16px; overflow: hidden;
+        }
+        .detail-hero {
+            position: relative; height: 250px; overflow: hidden;
+        }
+        .detail-hero img {
+            width: 100%; height: 100%; object-fit: cover;
+        }
+        .detail-hero-gradient {
+            position: absolute; bottom: 0; left: 0; right: 0; height: 150px;
+            background: linear-gradient(transparent, #161616);
+        }
+        .detail-hero-info {
+            position: absolute; bottom: 16px; left: 20px; right: 20px;
+        }
+        .detail-hero-title { font-size: 24px; font-weight: 700; color: #fff; text-shadow: 0 2px 8px rgba(0,0,0,0.5); }
+        .detail-hero-meta { font-size: 12px; color: #aaa; margin-top: 4px; }
+        .detail-hero-meta .rating { color: #f5c518; }
 
-        .stat-card .value {
-            font-size: 18px;
-            font-weight: 600;
-            color: #fff;
+        .detail-body { padding: 20px; }
+        .detail-overview { font-size: 13px; color: #999; line-height: 1.5; margin-bottom: 20px; }
+        .detail-close {
+            position: absolute; top: 16px; right: 16px; background: rgba(0,0,0,0.6);
+            border: none; color: #fff; width: 32px; height: 32px; border-radius: 50%;
+            font-size: 16px; cursor: pointer; z-index: 10; display: flex; align-items: center; justify-content: center;
         }
+        .detail-close:hover { background: rgba(255,255,255,0.2); }
 
-        .note {
-            font-size: 12px;
-            color: #555;
-            margin-top: 20px;
+        .episode-list { display: flex; flex-direction: column; gap: 10px; }
+        .episode-row {
+            display: flex; align-items: center; gap: 14px; padding: 10px 12px;
+            background: #1a1a1a; border-radius: 8px; transition: background 0.15s;
         }
+        .episode-row:hover { background: #222; }
+        .ep-thumb {
+            width: 120px; height: 68px; border-radius: 6px; object-fit: cover; background: #111; flex-shrink: 0;
+        }
+        .ep-info { flex: 1; min-width: 0; }
+        .ep-label { font-size: 11px; color: #666; }
+        .ep-title { font-size: 13px; font-weight: 500; color: #eee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .ep-overview { font-size: 11px; color: #666; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+        .ep-meta { font-size: 10px; color: #555; margin-top: 3px; }
+        .ep-status { flex-shrink: 0; font-size: 11px; }
+        .ep-status .watched { color: #34c759; }
+        .ep-status .in-progress { color: #0a84ff; }
+        .ep-status .format-badge {
+            display: inline-block; padding: 2px 6px; border-radius: 4px;
+            font-size: 10px; font-weight: 600;
+        }
+        .ep-status .mp4 { background: #1a3a1a; color: #34c759; }
+        .ep-status .mkv { background: #3a2a1a; color: #ff9500; }
+
+        .series-empty {
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            height: 100%; color: #555; gap: 12px;
+        }
+        .series-empty svg { width: 48px; height: 48px; fill: #444; }
     </style>
 </head>
 <body>
@@ -236,30 +186,29 @@
     </div>
 
     <div class="tabs">
+        <div class="tab" data-page="library">Library</div>
         <div class="tab active" data-page="logs">Logs</div>
         <div class="tab" data-page="settings">Settings</div>
     </div>
 
     <div class="content">
+        <!-- Library page -->
+        <div class="page" id="page-library">
+            <div id="seriesGrid" class="series-grid"></div>
+            <div id="seriesEmpty" class="series-empty" style="display:none;">
+                <div style="font-size: 40px;">📺</div>
+                <div>No series found</div>
+                <div style="font-size: 12px;">Configure your media path in Settings</div>
+            </div>
+        </div>
+
         <!-- Logs page -->
         <div class="page active" id="page-logs">
             <div class="stats" id="statsBar">
-                <div class="stat-card">
-                    <div class="label">Status</div>
-                    <div class="value" id="statStatus">Starting...</div>
-                </div>
-                <div class="stat-card">
-                    <div class="label">Port</div>
-                    <div class="value" id="statPort">—</div>
-                </div>
-                <div class="stat-card">
-                    <div class="label">Server Name</div>
-                    <div class="value" id="statName">—</div>
-                </div>
-                <div class="stat-card">
-                    <div class="label">Media Path</div>
-                    <div class="value" id="statPath" style="font-size: 13px; word-break: break-all;">—</div>
-                </div>
+                <div class="stat-card"><div class="label">Status</div><div class="value" id="statStatus">Starting...</div></div>
+                <div class="stat-card"><div class="label">Port</div><div class="value" id="statPort">—</div></div>
+                <div class="stat-card"><div class="label">Server Name</div><div class="value" id="statName">—</div></div>
+                <div class="stat-card"><div class="label">Media Path</div><div class="value" id="statPath" style="font-size: 13px; word-break: break-all;">—</div></div>
             </div>
             <div class="log-container" id="logContainer"></div>
         </div>
@@ -267,22 +216,10 @@
         <!-- Settings page -->
         <div class="page" id="page-settings">
             <div class="settings-form">
-                <div class="field">
-                    <label>Media Path</label>
-                    <input type="text" id="cfgMediaPath" placeholder="C:/Videos or /path/to/media">
-                </div>
-                <div class="field">
-                    <label>TMDB API Key</label>
-                    <input type="text" id="cfgTmdbKey" placeholder="Optional — for metadata and artwork">
-                </div>
-                <div class="field">
-                    <label>Server Name</label>
-                    <input type="text" id="cfgServerName" placeholder="Cast Server">
-                </div>
-                <div class="field">
-                    <label>Port</label>
-                    <input type="number" id="cfgPort" placeholder="3456">
-                </div>
+                <div class="field"><label>Media Path</label><input type="text" id="cfgMediaPath" placeholder="C:/Videos or /path/to/media"></div>
+                <div class="field"><label>TMDB API Key</label><input type="text" id="cfgTmdbKey" placeholder="Optional — for metadata and artwork"></div>
+                <div class="field"><label>Server Name</label><input type="text" id="cfgServerName" placeholder="Cast Server"></div>
+                <div class="field"><label>Port</label><input type="number" id="cfgPort" placeholder="3456"></div>
                 <div>
                     <button class="save-btn" id="saveBtn">Save & Start Server</button>
                     <span class="save-msg" id="saveMsg">Saved!</span>
@@ -292,9 +229,18 @@
         </div>
     </div>
 
+    <!-- Series detail overlay -->
+    <div class="detail-overlay" id="detailOverlay">
+        <div class="detail-content" id="detailContent"></div>
+    </div>
+
     <script>
         const { invoke } = window.__TAURI__.core;
         const { listen } = window.__TAURI__.event;
+
+        let serverPort = 3456;
+
+        function apiUrl(path) { return `http://127.0.0.1:${serverPort}${path}`; }
 
         // Tab switching
         document.querySelectorAll('.tab').forEach(tab => {
@@ -303,48 +249,40 @@
                 document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
                 tab.classList.add('active');
                 document.getElementById('page-' + tab.dataset.page).classList.add('active');
+                if (tab.dataset.page === 'library') loadLibrary();
             });
         });
 
-        // Log container
+        // --- Logs ---
         const logContainer = document.getElementById('logContainer');
 
         function addLog(timestamp, message) {
             const entry = document.createElement('div');
             entry.className = 'log-entry';
-            entry.innerHTML = `<span class="log-time">${timestamp}</span><span class="log-msg">${escapeHtml(message)}</span>`;
+            entry.innerHTML = `<span class="log-time">${timestamp}</span><span class="log-msg">${esc(message)}</span>`;
             logContainer.appendChild(entry);
             logContainer.scrollTop = logContainer.scrollHeight;
         }
 
-        function escapeHtml(str) {
-            return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        }
+        function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
-        // Load initial logs
         async function loadLogs() {
             const logs = await invoke('get_logs');
             logContainer.innerHTML = '';
             logs.forEach(log => addLog(log.timestamp, log.message));
         }
 
-        // Listen for new log events
-        listen('server-log', (event) => {
+        listen('server-log', (e) => {
             const now = new Date().toLocaleTimeString('en-GB', { hour12: false });
-            addLog(now, event.payload);
+            addLog(now, e.payload);
         });
-
-        // Listen for status changes
-        listen('server-status', (event) => {
-            updateStatus(event.payload);
-        });
+        listen('server-status', (e) => updateStatus(e.payload));
 
         function updateStatus(running, mediaPath) {
             const dot = document.getElementById('statusDot');
             const statStatus = document.getElementById('statStatus');
             const headerInfo = document.getElementById('headerInfo');
-
-            if (!mediaPath) {
+            if (!mediaPath && !running) {
                 dot.className = 'status-dot stopped';
                 statStatus.textContent = 'Not configured';
                 statStatus.style.color = '#ff9500';
@@ -357,16 +295,16 @@
             }
         }
 
-        // Load stats
         async function loadStats() {
             const stats = await invoke('get_server_stats');
+            serverPort = stats.port;
             updateStatus(stats.running, stats.media_path);
             document.getElementById('statPort').textContent = stats.port;
             document.getElementById('statName').textContent = stats.name || '—';
             document.getElementById('statPath').textContent = stats.media_path || 'Not configured';
         }
 
-        // Load settings
+        // --- Settings ---
         async function loadSettings() {
             const config = await invoke('get_config');
             document.getElementById('cfgMediaPath').value = config.media_path;
@@ -375,7 +313,6 @@
             document.getElementById('cfgPort').value = config.port;
         }
 
-        // Save settings and start server
         document.getElementById('saveBtn').addEventListener('click', async () => {
             const btn = document.getElementById('saveBtn');
             const config = {
@@ -388,30 +325,151 @@
                 btn.disabled = true;
                 btn.textContent = 'Saving...';
                 await invoke('save_config', { config });
-
                 btn.textContent = 'Starting server...';
                 await invoke('restart_server');
-
                 const msg = document.getElementById('saveMsg');
                 msg.classList.add('show');
                 setTimeout(() => msg.classList.remove('show'), 3000);
-
-                // Switch to logs tab
+                // Switch to logs
                 document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
                 document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
                 document.querySelector('[data-page="logs"]').classList.add('active');
                 document.getElementById('page-logs').classList.add('active');
-
                 loadStats();
-            } catch (e) {
-                alert('Error: ' + e);
-            } finally {
-                btn.disabled = false;
-                btn.textContent = 'Save & Start Server';
-            }
+            } catch (e) { alert('Error: ' + e); }
+            finally { btn.disabled = false; btn.textContent = 'Save & Start Server'; }
         });
 
-        // Poll stats every 5 seconds
+        // --- Library ---
+        async function loadLibrary() {
+            const grid = document.getElementById('seriesGrid');
+            const empty = document.getElementById('seriesEmpty');
+            try {
+                const resp = await fetch(apiUrl('/api/series'));
+                if (!resp.ok) throw new Error('Server not responding');
+                const series = await resp.json();
+
+                if (series.length === 0) {
+                    grid.style.display = 'none';
+                    empty.style.display = 'flex';
+                    return;
+                }
+
+                grid.style.display = 'grid';
+                empty.style.display = 'none';
+                grid.innerHTML = series.map(s => `
+                    <div class="series-card" onclick="showDetail('${s.id}')">
+                        ${s.has_backdrop
+                            ? `<img class="series-card-image" src="${apiUrl('/api/series/' + s.id + '/backdrop')}" loading="lazy">`
+                            : s.has_art
+                                ? `<img class="series-card-image" src="${apiUrl('/api/series/' + s.id + '/art')}" loading="lazy">`
+                                : `<div class="series-card-image" style="display:flex;align-items:center;justify-content:center;font-size:32px;color:#333;">${s.title.charAt(0)}</div>`
+                        }
+                        <div class="series-card-body">
+                            <div class="series-card-title">${esc(s.title)}</div>
+                            <div class="series-card-meta">
+                                ${s.year ? `<span>${s.year}</span>` : ''}
+                                ${s.rating ? `<span class="rating">★ ${s.rating.toFixed(1)}</span>` : ''}
+                                ${s.genres ? `<span>${esc(s.genres)}</span>` : ''}
+                            </div>
+                            ${s.overview ? `<div class="series-card-overview">${esc(s.overview)}</div>` : ''}
+                            <div class="series-card-episodes">${s.episode_count} episode${s.episode_count !== 1 ? 's' : ''} · ${s.watched_count} watched</div>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (e) {
+                grid.style.display = 'none';
+                empty.style.display = 'flex';
+                empty.innerHTML = '<div style="font-size: 40px;">⚠️</div><div>Cannot connect to server</div><div style="font-size: 12px;">Start the server from Settings</div>';
+            }
+        }
+
+        async function showDetail(seriesId) {
+            const overlay = document.getElementById('detailOverlay');
+            const content = document.getElementById('detailContent');
+
+            try {
+                const resp = await fetch(apiUrl(`/api/series/${seriesId}`));
+                const detail = await resp.json();
+
+                content.innerHTML = `
+                    <div class="detail-hero" style="position: relative;">
+                        <button class="detail-close" onclick="closeDetail()">✕</button>
+                        ${detail.has_backdrop
+                            ? `<img src="${apiUrl('/api/series/' + detail.id + '/backdrop')}">`
+                            : detail.has_art
+                                ? `<img src="${apiUrl('/api/series/' + detail.id + '/art')}" style="filter: blur(10px); transform: scale(1.1);">`
+                                : `<div style="width:100%;height:100%;background:#111;"></div>`
+                        }
+                        <div class="detail-hero-gradient"></div>
+                        <div class="detail-hero-info">
+                            <div class="detail-hero-title">${esc(detail.title)}</div>
+                            <div class="detail-hero-meta">
+                                ${detail.year ? detail.year : ''}
+                                ${detail.genres ? `· ${esc(detail.genres)}` : ''}
+                                ${detail.rating ? `· <span class="rating">★ ${detail.rating.toFixed(1)}</span>` : ''}
+                            </div>
+                        </div>
+                    </div>
+                    <div class="detail-body">
+                        ${detail.overview ? `<div class="detail-overview">${esc(detail.overview)}</div>` : ''}
+                        <div class="episode-list">
+                            ${detail.episodes.map(ep => {
+                                const ext = guessFormat(ep);
+                                const watched = ep.progress?.completed;
+                                const inProgress = ep.progress && !ep.progress.completed;
+                                return `
+                                    <div class="episode-row">
+                                        ${ep.still_url
+                                            ? `<img class="ep-thumb" src="${ep.still_url}" loading="lazy">`
+                                            : `<div class="ep-thumb" style="display:flex;align-items:center;justify-content:center;color:#444;font-size:11px;">${ep.season_number ? 'S' + ep.season_number + ' E' + ep.episode_number : 'Ep ' + (ep.index+1)}</div>`
+                                        }
+                                        <div class="ep-info">
+                                            <div class="ep-label">${ep.season_number ? 'S' + ep.season_number + ' E' + ep.episode_number : 'Episode ' + (ep.index+1)}</div>
+                                            <div class="ep-title">${esc(ep.title)}</div>
+                                            ${ep.overview ? `<div class="ep-overview">${esc(ep.overview)}</div>` : ''}
+                                            <div class="ep-meta">
+                                                ${ep.runtime_minutes ? ep.runtime_minutes + ' min' : ''}
+                                                ${ep.air_date ? ' · ' + ep.air_date : ''}
+                                            </div>
+                                        </div>
+                                        <div class="ep-status">
+                                            ${watched ? '<span class="watched">✓ Watched</span>' : ''}
+                                            ${inProgress ? '<span class="in-progress">▶ ' + Math.round(ep.progress.position_secs / ep.progress.duration_secs * 100) + '%</span>' : ''}
+                                        </div>
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+                `;
+
+                overlay.classList.add('active');
+            } catch (e) {
+                console.error('Failed to load detail:', e);
+            }
+        }
+
+        function guessFormat(ep) {
+            // We don't have the filename in the API, but we can check if it has subtitles embedded
+            return 'mp4'; // default assumption
+        }
+
+        function closeDetail() {
+            document.getElementById('detailOverlay').classList.remove('active');
+        }
+
+        // Close overlay on Escape
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeDetail();
+        });
+
+        // Close overlay on background click
+        document.getElementById('detailOverlay').addEventListener('click', (e) => {
+            if (e.target === e.currentTarget) closeDetail();
+        });
+
+        // Poll stats
         setInterval(loadStats, 5000);
 
         // Initial load

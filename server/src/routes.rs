@@ -69,6 +69,8 @@ impl ApiError {
 type ApiResult<T> = Result<T, (StatusCode, Json<ApiError>)>;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
+    let cors = tower_http::cors::CorsLayer::permissive();
+
     Router::new()
         .route("/api/series", get(list_series))
         .route("/api/series/{series_id}", get(get_series))
@@ -89,6 +91,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/episodes/{episode_id}/credits", get(get_episode_credits))
         .route("/api/person/{person_id}", get(get_person))
         .route("/api/episodes/{episode_id}/prepare", post(prepare_episode))
+        .layer(cors)
         .with_state(state)
 }
 

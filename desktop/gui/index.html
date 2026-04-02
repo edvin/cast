@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cast Server</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: #0d0d0d;
+            color: #e0e0e0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            user-select: none;
+        }
+
+        /* Header */
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px 24px;
+            background: #161616;
+            border-bottom: 1px solid #222;
+            -webkit-app-region: drag;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #444;
+            transition: background 0.3s;
+        }
+
+        .status-dot.running { background: #34c759; box-shadow: 0 0 8px #34c75966; }
+        .status-dot.stopped { background: #ff3b30; }
+
+        .header h1 {
+            font-size: 16px;
+            font-weight: 600;
+            color: #fff;
+        }
+
+        .header-info {
+            font-size: 12px;
+            color: #888;
+        }
+
+        /* Tabs */
+        .tabs {
+            display: flex;
+            background: #161616;
+            border-bottom: 1px solid #222;
+        }
+
+        .tab {
+            padding: 10px 24px;
+            font-size: 13px;
+            color: #888;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+            -webkit-app-region: no-drag;
+        }
+
+        .tab:hover { color: #ccc; }
+        .tab.active { color: #fff; border-bottom-color: #0a84ff; }
+
+        /* Content */
+        .content {
+            flex: 1;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .page {
+            position: absolute;
+            inset: 0;
+            padding: 24px;
+            overflow-y: auto;
+            display: none;
+            flex-direction: column;
+        }
+
+        .page.active { display: flex !important; }
+
+        /* Log viewer */
+        .log-container {
+            background: #111;
+            border: 1px solid #222;
+            border-radius: 8px;
+            padding: 16px 16px 24px 16px;
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+
+        .log-entry {
+            display: flex;
+            gap: 12px;
+        }
+
+        .log-time {
+            color: #555;
+            flex-shrink: 0;
+        }
+
+        .log-msg {
+            color: #ccc;
+            word-break: break-all;
+        }
+
+        .log-entry:last-child .log-msg {
+            color: #fff;
+        }
+
+        /* Settings */
+        .settings-form {
+            max-width: 500px;
+        }
+
+        .field {
+            margin-bottom: 20px;
+        }
+
+        .field label {
+            display: block;
+            font-size: 12px;
+            color: #888;
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .field input {
+            width: 100%;
+            padding: 10px 14px;
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 6px;
+            color: #fff;
+            font-size: 14px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .field input:focus {
+            border-color: #0a84ff;
+        }
+
+        .field input::placeholder {
+            color: #555;
+        }
+
+        .save-btn {
+            padding: 10px 24px;
+            background: #0a84ff;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .save-btn:hover { background: #0070e0; }
+        .save-btn:disabled { background: #333; color: #666; cursor: not-allowed; }
+
+        .save-msg {
+            margin-left: 12px;
+            font-size: 13px;
+            color: #34c759;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .save-msg.show { opacity: 1; }
+
+        /* Status cards */
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .stat-card {
+            background: #161616;
+            border: 1px solid #222;
+            border-radius: 8px;
+            padding: 16px;
+        }
+
+        .stat-card .label {
+            font-size: 11px;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
+        }
+
+        .stat-card .value {
+            font-size: 18px;
+            font-weight: 600;
+            color: #fff;
+        }
+
+        .note {
+            font-size: 12px;
+            color: #555;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-left">
+            <div class="status-dot" id="statusDot"></div>
+            <h1>Cast Server</h1>
+        </div>
+        <span class="header-info" id="headerInfo">Starting...</span>
+    </div>
+
+    <div class="tabs">
+        <div class="tab active" data-page="logs">Logs</div>
+        <div class="tab" data-page="settings">Settings</div>
+    </div>
+
+    <div class="content">
+        <!-- Logs page -->
+        <div class="page active" id="page-logs">
+            <div class="stats" id="statsBar">
+                <div class="stat-card">
+                    <div class="label">Status</div>
+                    <div class="value" id="statStatus">Starting...</div>
+                </div>
+                <div class="stat-card">
+                    <div class="label">Port</div>
+                    <div class="value" id="statPort">—</div>
+                </div>
+                <div class="stat-card">
+                    <div class="label">Server Name</div>
+                    <div class="value" id="statName">—</div>
+                </div>
+                <div class="stat-card">
+                    <div class="label">Media Path</div>
+                    <div class="value" id="statPath" style="font-size: 13px; word-break: break-all;">—</div>
+                </div>
+            </div>
+            <div class="log-container" id="logContainer"></div>
+        </div>
+
+        <!-- Settings page -->
+        <div class="page" id="page-settings">
+            <div class="settings-form">
+                <div class="field">
+                    <label>Media Path</label>
+                    <input type="text" id="cfgMediaPath" placeholder="C:/Videos or /path/to/media">
+                </div>
+                <div class="field">
+                    <label>TMDB API Key</label>
+                    <input type="text" id="cfgTmdbKey" placeholder="Optional — for metadata and artwork">
+                </div>
+                <div class="field">
+                    <label>Server Name</label>
+                    <input type="text" id="cfgServerName" placeholder="Cast Server">
+                </div>
+                <div class="field">
+                    <label>Port</label>
+                    <input type="number" id="cfgPort" placeholder="3456">
+                </div>
+                <div>
+                    <button class="save-btn" id="saveBtn">Save & Start Server</button>
+                    <span class="save-msg" id="saveMsg">Saved!</span>
+                </div>
+                <p class="note">Settings are saved alongside the executable.</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { invoke } = window.__TAURI__.core;
+        const { listen } = window.__TAURI__.event;
+
+        // Tab switching
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById('page-' + tab.dataset.page).classList.add('active');
+            });
+        });
+
+        // Log container
+        const logContainer = document.getElementById('logContainer');
+
+        function addLog(timestamp, message) {
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `<span class="log-time">${timestamp}</span><span class="log-msg">${escapeHtml(message)}</span>`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        function escapeHtml(str) {
+            return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        // Load initial logs
+        async function loadLogs() {
+            const logs = await invoke('get_logs');
+            logContainer.innerHTML = '';
+            logs.forEach(log => addLog(log.timestamp, log.message));
+        }
+
+        // Listen for new log events
+        listen('server-log', (event) => {
+            const now = new Date().toLocaleTimeString('en-GB', { hour12: false });
+            addLog(now, event.payload);
+        });
+
+        // Listen for status changes
+        listen('server-status', (event) => {
+            updateStatus(event.payload);
+        });
+
+        function updateStatus(running, mediaPath) {
+            const dot = document.getElementById('statusDot');
+            const statStatus = document.getElementById('statStatus');
+            const headerInfo = document.getElementById('headerInfo');
+
+            if (!mediaPath) {
+                dot.className = 'status-dot stopped';
+                statStatus.textContent = 'Not configured';
+                statStatus.style.color = '#ff9500';
+                headerInfo.textContent = 'Set media path in Settings';
+            } else {
+                dot.className = 'status-dot ' + (running ? 'running' : 'stopped');
+                statStatus.textContent = running ? 'Running' : 'Stopped';
+                statStatus.style.color = running ? '#34c759' : '#ff3b30';
+                headerInfo.textContent = running ? 'Running' : 'Not running';
+            }
+        }
+
+        // Load stats
+        async function loadStats() {
+            const stats = await invoke('get_server_stats');
+            updateStatus(stats.running, stats.media_path);
+            document.getElementById('statPort').textContent = stats.port;
+            document.getElementById('statName').textContent = stats.name || '—';
+            document.getElementById('statPath').textContent = stats.media_path || 'Not configured';
+        }
+
+        // Load settings
+        async function loadSettings() {
+            const config = await invoke('get_config');
+            document.getElementById('cfgMediaPath').value = config.media_path;
+            document.getElementById('cfgTmdbKey').value = config.tmdb_key;
+            document.getElementById('cfgServerName').value = config.server_name;
+            document.getElementById('cfgPort').value = config.port;
+        }
+
+        // Save settings and start server
+        document.getElementById('saveBtn').addEventListener('click', async () => {
+            const btn = document.getElementById('saveBtn');
+            const config = {
+                media_path: document.getElementById('cfgMediaPath').value,
+                tmdb_key: document.getElementById('cfgTmdbKey').value,
+                server_name: document.getElementById('cfgServerName').value || 'Cast Server',
+                port: parseInt(document.getElementById('cfgPort').value) || 3456,
+            };
+            try {
+                btn.disabled = true;
+                btn.textContent = 'Saving...';
+                await invoke('save_config', { config });
+
+                btn.textContent = 'Starting server...';
+                await invoke('restart_server');
+
+                const msg = document.getElementById('saveMsg');
+                msg.classList.add('show');
+                setTimeout(() => msg.classList.remove('show'), 3000);
+
+                // Switch to logs tab
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+                document.querySelector('[data-page="logs"]').classList.add('active');
+                document.getElementById('page-logs').classList.add('active');
+
+                loadStats();
+            } catch (e) {
+                alert('Error: ' + e);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Save & Start Server';
+            }
+        });
+
+        // Poll stats every 5 seconds
+        setInterval(loadStats, 5000);
+
+        // Initial load
+        loadLogs();
+        loadStats();
+        loadSettings();
+    </script>
+</body>
+</html>

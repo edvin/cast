@@ -1,0 +1,18 @@
+# Rust
+target/
+server/target/
+
+# macOS
+.DS_Store
+
+# Xcode
+Cast/Cast.xcodeproj/xcuserdata/
+Cast/Cast.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcuserstate
+
+# Environment
+.env
+
+# IDE
+.idea/
+.vscode/

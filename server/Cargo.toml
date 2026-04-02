@@ -1,0 +1,39 @@
+[package]
+name = "cast-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+walkdir = "2"
+mdns-sd = "0.12"
+clap = { version = "4", features = ["derive", "env"] }
+uuid = { version = "1", features = ["v5"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+directories = "5"
+mime_guess = "2"
+hostname = "0.4"
+anyhow = "1"
+dotenvy = "0.15"
+regex = "1"
+reqwest = { version = "0.12", features = ["json"] }
+get_if_addrs = "0.5.3"
+tokio-stream = "0.1.18"
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[lints.clippy]
+needless_return = "warn"
+redundant_closure = "warn"
+uninlined_format_args = "warn"

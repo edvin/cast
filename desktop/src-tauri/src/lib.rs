@@ -180,6 +180,141 @@ fn get_server_stats(state: tauri::State<'_, DesktopState>) -> ServerStats {
 }
 
 #[derive(serde::Serialize)]
+struct IngestResult {
+    success: bool,
+    series_name: String,
+    filename: String,
+    message: String,
+}
+
+#[tauri::command]
+fn ingest_file(state: tauri::State<'_, DesktopState>, file_path: String) -> Result<IngestResult, String> {
+    let config = state.config.lock().unwrap().clone();
+    if config.media_path.is_empty() {
+        return Err("Media path not configured".to_string());
+    }
+
+    let source = std::path::Path::new(&file_path);
+    if !source.exists() {
+        return Err(format!("File not found: {file_path}"));
+    }
+
+    let filename = source.file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("Invalid filename")?
+        .to_string();
+
+    // Parse series name from filename
+    // Common patterns: "Show.Name.S01E03.stuff.mkv" or "Show Name - S01E03 - Title.mp4"
+    let series_name = extract_series_name(&filename);
+
+    // Create series folder if it doesn't exist
+    let media_root = std::path::Path::new(&config.media_path);
+    let series_dir = media_root.join(&series_name);
+    std::fs::create_dir_all(&series_dir).map_err(|e| format!("Failed to create folder: {e}"))?;
+
+    // Move/copy the file
+    let dest = series_dir.join(&filename);
+    if dest.exists() {
+        return Err(format!("File already exists: {}", dest.display()));
+    }
+
+    // Try move first (fast, same filesystem), fall back to copy+delete
+    if std::fs::rename(source, &dest).is_err() {
+        std::fs::copy(source, &dest).map_err(|e| format!("Failed to copy file: {e}"))?;
+        let _ = std::fs::remove_file(source); // best effort delete original
+    }
+
+    Ok(IngestResult {
+        success: true,
+        series_name: series_name.clone(),
+        filename: filename.clone(),
+        message: format!("Added {} to {}", filename, series_name),
+    })
+}
+
+/// Extract series name from a video filename.
+/// "Show.Name.S01E03.720p.WEB.x264-GROUP.mkv" → "Show Name"
+/// "Show Name - S01E03 - Episode Title.mp4" → "Show Name"
+fn extract_series_name(filename: &str) -> String {
+    let stem = std::path::Path::new(filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename);
+
+    // Replace dots and underscores with spaces
+    let cleaned = stem.replace(['.', '_'], " ");
+
+    // Find S01E03 or s01e03 pattern and take everything before it
+    if let Some(idx) = cleaned.to_lowercase().find(|c: char| {
+        false // placeholder
+    }) {
+        // won't match, use regex below
+    }
+
+    // Use regex-like manual search for SxxExx
+    let lower = cleaned.to_lowercase();
+    for (i, _) in lower.char_indices() {
+        if i + 6 <= lower.len() {
+            let slice = &lower[i..];
+            if slice.starts_with('s') {
+                // Check for SxxExx pattern
+                let rest = &slice[1..];
+                if let Some(e_pos) = rest.find('e') {
+                    let season_part = &rest[..e_pos];
+                    let ep_part = &rest[e_pos + 1..];
+                    if season_part.len() <= 3
+                        && !season_part.is_empty()
+                        && season_part.chars().all(|c| c.is_ascii_digit())
+                        && ep_part.len() >= 1
+                        && ep_part.chars().take(3).all(|c| c.is_ascii_digit())
+                    {
+                        let name = cleaned[..i].trim().trim_end_matches('-').trim();
+                        if !name.is_empty() {
+                            return name.to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Try "Name - " pattern (dash separator before episode info)
+    if let Some(idx) = cleaned.find(" - ") {
+        let name = cleaned[..idx].trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
+
+    // Fallback: strip common tags and use the whole thing
+    let mut name = cleaned;
+    for tag in ["720p", "1080p", "2160p", "4k", "web", "webrip", "hdtv",
+                "bluray", "h264", "h265", "x264", "x265", "hevc", "aac"] {
+        if let Some(pos) = name.to_lowercase().find(tag) {
+            name = name[..pos].to_string();
+        }
+    }
+    name.trim().trim_end_matches('-').trim().to_string()
+}
+
+#[tauri::command]
+fn ingest_files(state: tauri::State<'_, DesktopState>, file_paths: Vec<String>) -> Vec<IngestResult> {
+    file_paths.iter().map(|path| {
+        match ingest_file(state.clone(), path.clone()) {
+            Ok(r) => r,
+            Err(e) => IngestResult {
+                success: false,
+                series_name: String::new(),
+                filename: std::path::Path::new(path).file_name()
+                    .and_then(|n| n.to_str()).unwrap_or(path).to_string(),
+                message: e,
+            }
+        }
+    }).collect()
+}
+
+#[derive(serde::Serialize)]
 struct ServerStats {
     running: bool,
     port: u16,
@@ -212,12 +347,29 @@ pub fn run() {
             restart_server,
             is_server_running,
             get_server_stats,
+            ingest_file,
+            ingest_files,
         ])
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Hide to tray instead of quitting
-                let _ = window.hide();
-                api.prevent_close();
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
+                tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) => {
+                    let video_exts = ["mp4", "mkv", "avi", "webm", "mov", "m4v"];
+                    let video_paths: Vec<String> = paths.iter()
+                        .filter(|p| p.extension()
+                            .and_then(|e| e.to_str())
+                            .map(|e| video_exts.contains(&e.to_lowercase().as_str()))
+                            .unwrap_or(false))
+                        .map(|p| p.to_string_lossy().to_string())
+                        .collect();
+                    if !video_paths.is_empty() {
+                        let _ = window.emit("files-dropped", video_paths);
+                    }
+                }
+                _ => {}
             }
         })
         .setup(move |app| {

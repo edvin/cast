@@ -208,6 +208,34 @@
         }
         .action-btn-sm:hover { background: #252525; color: #fff; }
         .action-btn-sm:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        /* Drop overlay */
+        .drop-overlay {
+            position: fixed; inset: 0; background: rgba(10, 132, 255, 0.15);
+            border: 3px dashed #0a84ff; z-index: 200;
+            display: none; align-items: center; justify-content: center;
+        }
+        .drop-overlay.active { display: flex; }
+        .drop-overlay-content {
+            text-align: center; padding: 40px;
+            background: rgba(0,0,0,0.8); border-radius: 16px;
+        }
+        .drop-overlay-content .icon { font-size: 48px; margin-bottom: 12px; }
+        .drop-overlay-content .title { font-size: 18px; font-weight: 600; color: #fff; }
+        .drop-overlay-content .sub { font-size: 13px; color: #888; margin-top: 4px; }
+
+        /* Ingest toast */
+        .toast {
+            position: fixed; bottom: 24px; right: 24px; z-index: 300;
+            background: #1a1a1a; border: 1px solid #333; border-radius: 10px;
+            padding: 14px 20px; min-width: 280px;
+            transform: translateY(100px); opacity: 0; transition: all 0.3s;
+        }
+        .toast.show { transform: translateY(0); opacity: 1; }
+        .toast-title { font-size: 13px; font-weight: 600; color: #fff; }
+        .toast-msg { font-size: 11px; color: #888; margin-top: 4px; }
+        .toast-success { border-left: 3px solid #34c759; }
+        .toast-error { border-left: 3px solid #ff3b30; }
     </style>
 </head>
 <body>
@@ -263,6 +291,18 @@
             </div>
         </div>
     </div>
+
+    <!-- Drop overlay -->
+    <div class="drop-overlay" id="dropOverlay">
+        <div class="drop-overlay-content">
+            <div class="icon">📂</div>
+            <div class="title">Drop video files to add</div>
+            <div class="sub">Files will be organized into series folders automatically</div>
+        </div>
+    </div>
+
+    <!-- Toast notification -->
+    <div class="toast" id="toast"></div>
 
     <!-- Series detail overlay -->
     <div class="detail-overlay" id="detailOverlay">
@@ -627,6 +667,70 @@
                 btn.textContent = 'Failed';
                 btn.disabled = false;
             }
+        }
+
+        // --- Drag & Drop ---
+        const dropOverlay = document.getElementById('dropOverlay');
+
+        // Show overlay on drag over window
+        let dragCounter = 0;
+        document.addEventListener('dragenter', (e) => {
+            e.preventDefault();
+            dragCounter++;
+            dropOverlay.classList.add('active');
+        });
+        document.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            dragCounter--;
+            if (dragCounter <= 0) { dropOverlay.classList.remove('active'); dragCounter = 0; }
+        });
+        document.addEventListener('dragover', (e) => e.preventDefault());
+        document.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dragCounter = 0;
+            dropOverlay.classList.remove('active');
+        });
+
+        // Handle files dropped via Tauri event
+        listen('files-dropped', async (event) => {
+            const paths = event.payload;
+            if (!paths || paths.length === 0) return;
+
+            showToast(`Importing ${paths.length} file${paths.length > 1 ? 's' : ''}...`, '', 'success');
+
+            try {
+                const results = await invoke('ingest_files', { filePaths: paths });
+                const successes = results.filter(r => r.success);
+                const failures = results.filter(r => !r.success);
+
+                if (successes.length > 0) {
+                    const names = [...new Set(successes.map(r => r.series_name))];
+                    showToast(
+                        `Added ${successes.length} file${successes.length > 1 ? 's' : ''}`,
+                        `to ${names.join(', ')}`,
+                        'success'
+                    );
+                    // Refresh library after a delay (server needs to rescan)
+                    setTimeout(loadLibrary, 3000);
+                }
+                if (failures.length > 0) {
+                    showToast(
+                        `${failures.length} file${failures.length > 1 ? 's' : ''} failed`,
+                        failures[0].message,
+                        'error'
+                    );
+                }
+            } catch (e) {
+                showToast('Import failed', String(e), 'error');
+            }
+        });
+
+        function showToast(title, msg, type) {
+            const toast = document.getElementById('toast');
+            toast.className = `toast toast-${type}`;
+            toast.innerHTML = `<div class="toast-title">${esc(title)}</div>${msg ? `<div class="toast-msg">${esc(msg)}</div>` : ''}`;
+            setTimeout(() => toast.classList.add('show'), 10);
+            setTimeout(() => toast.classList.remove('show'), 4000);
         }
 
         // Polling

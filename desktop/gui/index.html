@@ -237,6 +237,29 @@
         .toast-msg { font-size: 11px; color: #888; margin-top: 4px; }
         .toast-success { border-left: 3px solid #34c759; }
         .toast-error { border-left: 3px solid #ff3b30; }
+
+        /* Custom confirm dialog */
+        .confirm-overlay {
+            position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+            display: none; z-index: 400; align-items: center; justify-content: center;
+        }
+        .confirm-overlay.active { display: flex; }
+        .confirm-box {
+            background: #1e1e1e; border: 1px solid #333; border-radius: 12px;
+            padding: 28px; max-width: 400px; width: 90%; text-align: center;
+        }
+        .confirm-icon { font-size: 36px; margin-bottom: 12px; }
+        .confirm-title { font-size: 16px; font-weight: 600; color: #fff; margin-bottom: 8px; }
+        .confirm-msg { font-size: 13px; color: #888; margin-bottom: 24px; line-height: 1.4; }
+        .confirm-buttons { display: flex; gap: 10px; justify-content: center; }
+        .confirm-btn {
+            padding: 8px 24px; border-radius: 6px; border: 1px solid #333;
+            font-size: 13px; cursor: pointer; transition: all 0.15s;
+        }
+        .confirm-cancel { background: #2a2a2a; color: #ccc; }
+        .confirm-cancel:hover { background: #333; }
+        .confirm-danger { background: #ff3b30; color: #fff; border-color: #ff3b30; }
+        .confirm-danger:hover { background: #e0342c; }
     </style>
 </head>
 <body>
@@ -245,7 +268,6 @@
             <div class="status-dot" id="statusDot"></div>
             <h1>Cast Server</h1>
         </div>
-        <span class="header-info" id="headerInfo">Starting...</span>
     </div>
 
     <div class="tabs">
@@ -297,6 +319,19 @@
     <div style="display:flex; align-items:center; gap:10px; padding:6px 16px; background:#111; border-top:1px solid #222; font-size:11px; color:#666; flex-shrink:0;">
         <span id="statusActivity">Ready</span>
         <span style="margin-left:auto;" id="statusTools"></span>
+    </div>
+
+    <!-- Confirm dialog -->
+    <div class="confirm-overlay" id="confirmOverlay">
+        <div class="confirm-box">
+            <div class="confirm-icon" id="confirmIcon">🗑</div>
+            <div class="confirm-title" id="confirmTitle"></div>
+            <div class="confirm-msg" id="confirmMsg"></div>
+            <div class="confirm-buttons">
+                <button class="confirm-btn confirm-cancel" onclick="resolveConfirm(false)">Cancel</button>
+                <button class="confirm-btn confirm-danger" id="confirmAction" onclick="resolveConfirm(true)">Delete</button>
+            </div>
+        </div>
     </div>
 
     <!-- Drop overlay -->
@@ -359,17 +394,14 @@
         function updateStatus(running, mediaPath) {
             const dot = document.getElementById('statusDot');
             const statStatus = document.getElementById('statStatus');
-            const headerInfo = document.getElementById('headerInfo');
             if (!mediaPath && !running) {
                 dot.className = 'status-dot stopped';
                 statStatus.textContent = 'Not configured';
                 statStatus.style.color = '#ff9500';
-                headerInfo.textContent = 'Set media path in Settings';
             } else {
                 dot.className = 'status-dot ' + (running ? 'running' : 'stopped');
                 statStatus.textContent = running ? 'Running' : 'Stopped';
                 statStatus.style.color = running ? '#34c759' : '#ff3b30';
-                headerInfo.textContent = running ? 'Running' : 'Not running';
             }
         }
 
@@ -588,7 +620,7 @@
                                             ${fmtClass === 'mkv' ? `<button class="action-btn-sm" onclick="event.stopPropagation(); prepareEp('${ep.id}', this)">Remux</button>` : ''}
                                             <div style="display:flex;gap:4px;margin-top:2px;">
                                                 <button class="action-btn-sm" onclick="event.stopPropagation(); playEp('${esc(detail.title)}/${esc(ep.filename)}')">▶ Play</button>
-                                                <button class="action-btn-sm" style="color:#ff3b30;" onclick="event.stopPropagation(); deleteEp('${ep.id}', '${esc(ep.title)}', '${detail.id}')">✕</button>
+                                                <button class="action-btn-sm" style="color:#ff3b30;" onclick="event.stopPropagation(); deleteEp('${ep.id}', '${esc(ep.title)}', '${detail.id}')" title="Delete episode">🗑</button>
                                             </div>
                                         </div>
                                     </div>
@@ -647,7 +679,8 @@
         }
 
         async function resetProgress(seriesId, btn) {
-            if (!confirm('Reset all watch progress for this series?')) return;
+            const ok = await showConfirm('Reset watch progress?', 'All episodes will be marked as unwatched.', 'Reset');
+            if (!ok) return;
             btn.disabled = true;
             try {
                 await fetch(apiUrl(`/api/series/${seriesId}/progress`), { method: 'DELETE' });
@@ -682,9 +715,36 @@
             }
         }
 
+        // --- Custom confirm ---
+        let confirmResolver = null;
+
+        function showConfirm(title, msg, actionLabel = 'Delete') {
+            return new Promise(resolve => {
+                confirmResolver = resolve;
+                document.getElementById('confirmTitle').textContent = title;
+                document.getElementById('confirmMsg').textContent = msg;
+                document.getElementById('confirmAction').textContent = actionLabel;
+                document.getElementById('confirmOverlay').classList.add('active');
+            });
+        }
+
+        function resolveConfirm(result) {
+            document.getElementById('confirmOverlay').classList.remove('active');
+            if (confirmResolver) { confirmResolver(result); confirmResolver = null; }
+        }
+
+        // Close confirm on Escape
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && confirmResolver) resolveConfirm(false);
+        });
+
         // --- Delete & Play ---
         async function deleteSeries(seriesId, title) {
-            if (!confirm(`Delete "${title}" and all its episodes? This cannot be undone.`)) return;
+            const ok = await showConfirm(
+                `Delete "${title}"?`,
+                'This will permanently remove the series folder and all episode files. This cannot be undone.'
+            );
+            if (!ok) return;
             try {
                 await fetch(apiUrl(`/api/series/${seriesId}`), { method: 'DELETE' });
                 closeDetail();
@@ -696,7 +756,11 @@
         }
 
         async function deleteEp(episodeId, title, seriesId) {
-            if (!confirm(`Delete "${title}"?`)) return;
+            const ok = await showConfirm(
+                `Delete "${title}"?`,
+                'This will permanently remove the episode file.'
+            );
+            if (!ok) return;
             try {
                 await fetch(apiUrl(`/api/episodes/${episodeId}`), { method: 'DELETE' });
                 showToast('Episode deleted', title, 'success');

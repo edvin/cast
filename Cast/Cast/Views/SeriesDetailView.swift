@@ -16,6 +16,8 @@ struct SeriesDetailView: View {
     @State private var isLoading = true
     @State private var error: CastError?
     @State private var playerEpisode: PlayerInfo?
+    @State private var preparingEpisode: EpisodeItem?
+    @State private var prepareProgress: Int?
 
     private var client: APIClient? {
         guard let url = connection.baseURL else { return nil }
@@ -70,6 +72,30 @@ struct SeriesDetailView: View {
                     episode: info.episode,
                     resumePosition: info.resumePosition
                 )
+            }
+        }
+        .overlay {
+            if let ep = preparingEpisode {
+                ZStack {
+                    Color.black.opacity(0.85).ignoresSafeArea()
+                    VStack(spacing: 20) {
+                        ProgressView()
+                            .scaleEffect(1.5)
+                        Text("Preparing \(ep.episodeLabel)...")
+                            .font(.title3)
+                        if let progress = prepareProgress {
+                            Text("\(progress)%")
+                                .font(.headline)
+                                .foregroundStyle(.secondary)
+                            ProgressView(value: Double(progress), total: 100)
+                                .frame(width: 300)
+                                .tint(.white)
+                        }
+                        Text("Converting for Apple TV playback")
+                            .font(.caption)
+                            .foregroundStyle(Color(white: 0.5))
+                    }
+                }
             }
         }
         .task { await loadData() }
@@ -207,7 +233,7 @@ struct SeriesDetailView: View {
 
                 ForEach(detail.episodes) { episode in
                     Button {
-                        playerEpisode = PlayerInfo(episode: episode, resumePosition: episode.progress?.positionSecs ?? 0)
+                        Task { await playEpisode(episode) }
                     } label: {
                         EpisodeRow(episode: episode, client: client)
                     }
@@ -250,6 +276,43 @@ struct SeriesDetailView: View {
             return "Start Watching"
         default:
             return "Play"
+        }
+    }
+
+    private func playEpisode(_ episode: EpisodeItem) async {
+        guard let client else { return }
+
+        // Check if episode needs preparation
+        do {
+            let status = try await client.prepareEpisode(episodeId: episode.id)
+            if status.ready {
+                // Ready to play immediately
+                playerEpisode = PlayerInfo(episode: episode, resumePosition: episode.progress?.positionSecs ?? 0)
+                return
+            }
+
+            // Show preparing overlay and poll for progress
+            preparingEpisode = episode
+            prepareProgress = status.progressPercent
+
+            while true {
+                try await Task.sleep(for: .seconds(2))
+                let status = try await client.prepareEpisode(episodeId: episode.id)
+                prepareProgress = status.progressPercent
+                if status.ready {
+                    preparingEpisode = nil
+                    prepareProgress = nil
+                    // Reload data since the file changed
+                    await loadData()
+                    playerEpisode = PlayerInfo(episode: episode, resumePosition: episode.progress?.positionSecs ?? 0)
+                    return
+                }
+            }
+        } catch {
+            // If prepare fails, try playing anyway
+            preparingEpisode = nil
+            prepareProgress = nil
+            playerEpisode = PlayerInfo(episode: episode, resumePosition: episode.progress?.positionSecs ?? 0)
         }
     }
 

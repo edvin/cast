@@ -88,6 +88,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/metadata/fetch", post(fetch_metadata))
         .route("/api/episodes/{episode_id}/credits", get(get_episode_credits))
         .route("/api/person/{person_id}", get(get_person))
+        .route("/api/episodes/{episode_id}/prepare", post(prepare_episode))
         .with_state(state)
 }
 
@@ -614,12 +615,16 @@ async fn stream_episode(
     // Check if a pre-remuxed MP4 sibling exists (from background remux)
     if needs_remux(&file_path) {
         let stem = file_path.file_stem().unwrap_or_default().to_string_lossy();
-        let mp4_sibling = file_path.parent().unwrap().join(format!("{stem}.mp4"));
-        if mp4_sibling.exists() {
-            // Serve the pre-remuxed MP4 instead
-            let file_size = mp4_sibling.metadata().map(|m| m.len())
+        let parent = file_path.parent().unwrap();
+        let mp4_sibling = parent.join(format!("{stem}.mp4"));
+        let legacy_mp4 = parent.join(".remux").join(format!("{stem}.mp4"));
+        let cached = if mp4_sibling.exists() { Some(mp4_sibling) }
+            else if legacy_mp4.exists() { Some(legacy_mp4) }
+            else { None };
+        if let Some(cached_path) = cached {
+            let file_size = cached_path.metadata().map(|m| m.len())
                 .map_err(|_| ApiError::not_found("Video file not found"))?;
-            return serve_file(mp4_sibling, &headers, file_size, "video/mp4").await;
+            return serve_file(cached_path, &headers, file_size, "video/mp4").await;
         }
     }
 
@@ -645,24 +650,30 @@ async fn stream_episode(
 }
 
 /// Remux a non-MP4 file to MP4 via ffmpeg.
-/// - If a cached .remux/*.mp4 exists, serve it with full byte-range support.
-/// - Otherwise, stream a fragmented MP4 directly from ffmpeg stdout (instant start)
-///   while simultaneously caching to disk for future plays.
+/// - If a sibling .mp4 or legacy .remux/*.mp4 exists, serve it with byte-range support.
+/// - Otherwise, stream a fragmented MP4 from ffmpeg stdout while caching alongside the original.
 async fn stream_remuxed(
     file_path: std::path::PathBuf,
     headers: HeaderMap,
     _file_size: u64,
 ) -> ApiResult<Response> {
-    let cache_dir = file_path.parent().unwrap().join(".remux");
-    let _ = std::fs::create_dir_all(&cache_dir);
-
+    let parent = file_path.parent().unwrap();
     let stem = file_path.file_stem().unwrap_or_default().to_string_lossy();
-    let cached_path = cache_dir.join(format!("{stem}.mp4"));
+    let sibling_mp4 = parent.join(format!("{stem}.mp4"));
+    let legacy_mp4 = parent.join(".remux").join(format!("{stem}.mp4"));
 
-    // If already cached in .remux/, serve with full byte-range support
-    if cached_path.exists() {
+    // Check for existing cached MP4 (sibling or legacy .remux/)
+    let cached = if sibling_mp4.exists() {
+        Some(sibling_mp4.clone())
+    } else if legacy_mp4.exists() {
+        Some(legacy_mp4)
+    } else {
+        None
+    };
+
+    if let Some(cached_path) = cached {
         let file_size = cached_path.metadata().map(|m| m.len())
-            .map_err(|_| ApiError::internal("Remuxed file not found"))?;
+            .map_err(|_| ApiError::internal("Cached file not found"))?;
         return serve_file(cached_path, &headers, file_size, "video/mp4").await;
     }
 
@@ -718,8 +729,9 @@ async fn stream_remuxed(
     let stdout = child.stdout.take()
         .ok_or_else(|| ApiError::internal("Failed to capture ffmpeg output"))?;
 
-    // Tee: read from ffmpeg, send to HTTP response AND write to cache file
-    let tmp_path = cache_dir.join(format!("{stem}.mp4.tmp"));
+    // Tee: read from ffmpeg, send to HTTP response AND write to sibling .mp4
+    let tmp_path = parent.join(format!("{stem}.mp4.tmp"));
+    let final_path = sibling_mp4;
     let cache_file = std::fs::File::create(&tmp_path).ok();
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(32);
@@ -750,13 +762,20 @@ async fn stream_remuxed(
             }
         }
         let _ = child.wait();
-        // Rename tmp to final cache path
+        // Rename tmp to final
         if let Some(ref mut f) = cache {
             let _ = f.flush();
         }
         drop(cache);
-        let _ = std::fs::rename(&tmp_path, &cached_path);
-        tracing::info!("Remux cached: {:?}", cached_path.file_name().unwrap());
+        if std::fs::rename(&tmp_path, &final_path).is_ok() {
+            tracing::info!("Remux cached: {:?}", final_path.file_name().unwrap());
+            // Delete original MKV since MP4 sibling now exists
+            if file_path.exists() {
+                if std::fs::remove_file(&file_path).is_ok() {
+                    tracing::info!("Deleted original: {:?}", file_path.file_name().unwrap());
+                }
+            }
+        }
     });
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -1078,6 +1097,116 @@ async fn get_episode_credits(
     Ok(Json(credits))
 }
 
+/// Prepare an episode for playback — triggers remux if needed, returns status
+#[derive(Serialize)]
+struct PrepareResponse {
+    ready: bool,
+    needs_remux: bool,
+    remuxing: bool,
+    progress_percent: Option<u32>,
+}
+
+async fn prepare_episode(
+    State(state): State<Arc<AppState>>,
+    Path(episode_id): Path<String>,
+) -> ApiResult<Json<PrepareResponse>> {
+    let lib = state.library.read().await;
+    let (_series, episode) = lib
+        .find_episode(&episode_id)
+        .ok_or_else(|| ApiError::not_found("Episode not found"))?;
+    let file_path = safe_media_path(&state.media_path, &episode.path)?;
+
+    // If it's already MP4, it's ready
+    if !needs_remux(&file_path) {
+        return Ok(Json(PrepareResponse { ready: true, needs_remux: false, remuxing: false, progress_percent: None }));
+    }
+
+    let stem = file_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+    let parent = file_path.parent().unwrap();
+    let mp4_path = parent.join(format!("{stem}.mp4"));
+    let tmp_path = parent.join(format!("{stem}.mp4.tmp"));
+    let legacy_mp4 = parent.join(".remux").join(format!("{stem}.mp4"));
+
+    // Already remuxed?
+    if mp4_path.exists() || legacy_mp4.exists() {
+        return Ok(Json(PrepareResponse { ready: true, needs_remux: true, remuxing: false, progress_percent: Some(100) }));
+    }
+
+    // Currently remuxing? Report progress based on file size ratio
+    let is_remuxing = state.remuxing.lock()
+        .map(|s| s.contains(&stem))
+        .unwrap_or(false);
+
+    if is_remuxing || tmp_path.exists() {
+        let progress = if let (Ok(tmp_meta), Ok(src_meta)) = (tmp_path.metadata(), file_path.metadata()) {
+            let src_size = src_meta.len() as f64;
+            let tmp_size = tmp_meta.len() as f64;
+            // Rough estimate: remuxed MP4 is ~similar size to source
+            Some((tmp_size / src_size * 100.0).min(99.0) as u32)
+        } else {
+            Some(0)
+        };
+        return Ok(Json(PrepareResponse { ready: false, needs_remux: true, remuxing: true, progress_percent: progress }));
+    }
+
+    // Not remuxing yet — kick it off now
+    let file_path_clone = file_path.to_path_buf();
+    let tmp_clone = tmp_path.clone();
+    let mp4_clone = mp4_path.clone();
+    let stem_clone = stem.clone();
+
+    // Mark as remuxing
+    if let Ok(mut set) = state.remuxing.lock() {
+        set.insert(stem.clone());
+    }
+
+    drop(lib);
+
+    let remuxing_ref = state.remuxing.clone();
+    tokio::task::spawn_blocking(move || {
+        let (video_codec, video_extra) = detect_video_codec(&file_path_clone);
+        tracing::info!("On-demand remux: {:?} (video: {video_codec})", file_path_clone.file_name().unwrap());
+
+        let mut cmd = std::process::Command::new("ffmpeg");
+        cmd.arg("-hide_banner").arg("-loglevel").arg("warning")
+            .arg("-i").arg(&file_path_clone).arg("-c:v").arg(video_codec);
+        if video_codec != "copy" {
+            for part in video_extra.split_whitespace() { cmd.arg(part); }
+        }
+        let output = cmd
+            .arg("-c:a").arg("aac").arg("-b:a").arg("192k").arg("-ac").arg("2")
+            .arg("-map").arg("0:v:0").arg("-map").arg("0:a:0")
+            .arg("-map").arg("0:s?").arg("-c:s").arg("mov_text")
+            .arg("-movflags").arg("+faststart").arg("-f").arg("mp4").arg("-y").arg(&tmp_clone)
+            .output();
+
+        match output {
+            Ok(result) if result.status.success() => {
+                if std::fs::rename(&tmp_clone, &mp4_clone).is_ok() {
+                    tracing::info!("On-demand remux complete: {:?}", mp4_clone.file_name().unwrap());
+                    // Delete original
+                    let _ = std::fs::remove_file(&file_path_clone);
+                }
+            }
+            Ok(result) => {
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                tracing::warn!("On-demand remux failed: {stderr}");
+                let _ = std::fs::remove_file(&tmp_clone);
+            }
+            Err(e) => {
+                tracing::warn!("ffmpeg not available: {e}");
+            }
+        }
+
+        // Unmark
+        if let Ok(mut set) = remuxing_ref.lock() {
+            set.remove(&stem_clone);
+        }
+    });
+
+    Ok(Json(PrepareResponse { ready: false, needs_remux: true, remuxing: true, progress_percent: Some(0) }))
+}
+
 /// Get person detail with biography and filmography from TMDB
 async fn get_person(
     State(state): State<Arc<AppState>>,
@@ -1130,6 +1259,8 @@ mod tests {
             media_path: dir.path().to_path_buf(),
             tmdb: None,
             active_streams: std::sync::Mutex::new(std::collections::HashSet::new()),
+            remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            log: None,
         });
 
         (dir, state, series_id, episode_ids)
@@ -1432,6 +1563,8 @@ mod tests {
             media_path: dir.path().to_path_buf(),
             tmdb: None,
             active_streams: std::sync::Mutex::new(std::collections::HashSet::new()),
+            remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            log: None,
         });
 
         let response = app(state)
@@ -1495,6 +1628,8 @@ mod tests {
             media_path: dir.path().to_path_buf(),
             tmdb: None,
             active_streams: std::sync::Mutex::new(std::collections::HashSet::new()),
+            remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            log: None,
         });
 
         (dir, state, series_id, episode_id)
@@ -1712,6 +1847,8 @@ mod tests {
             media_path: dir.path().to_path_buf(),
             tmdb: None,
             active_streams: std::sync::Mutex::new(std::collections::HashSet::new()),
+            remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            log: None,
         });
 
         // Mark episode in series A as in-progress

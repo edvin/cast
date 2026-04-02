@@ -229,6 +229,22 @@ struct EpisodeCredits: Codable {
     }
 }
 
+// MARK: - Playback Preparation
+
+struct PrepareResponse: Codable {
+    let ready: Bool
+    let needsRemux: Bool
+    let remuxing: Bool
+    let progressPercent: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case ready
+        case needsRemux = "needs_remux"
+        case remuxing
+        case progressPercent = "progress_percent"
+    }
+}
+
 // MARK: - Server Error Response
 
 struct ApiError: Codable {

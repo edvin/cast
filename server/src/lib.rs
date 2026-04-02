@@ -10,12 +10,26 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+pub type LogCallback = Arc<dyn Fn(&str) + Send + Sync>;
+
 pub struct AppState {
     pub library: RwLock<library::Library>,
     pub db: db::Database,
     pub media_path: PathBuf,
     pub tmdb: Option<tmdb::TmdbClient>,
     pub active_streams: std::sync::Mutex<std::collections::HashSet<String>>,
+    pub remuxing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    pub log: Option<LogCallback>,
+}
+
+impl AppState {
+    /// Log a message to both tracing and the UI callback
+    pub fn log(&self, msg: &str) {
+        tracing::info!("{msg}");
+        if let Some(ref cb) = self.log {
+            cb(msg);
+        }
+    }
 }
 
 /// Configuration for starting the Cast server
@@ -39,6 +53,11 @@ pub async fn start_server(
     config: ServerConfig,
     log_callback: Option<Box<dyn Fn(&str) + Send + Sync>>,
 ) -> Result<ServerHandle, Box<dyn std::error::Error>> {
+    let log_cb: Option<LogCallback> = log_callback.map(|cb| Arc::from(cb) as LogCallback);
+    let log = |msg: &str, cb: &Option<LogCallback>| {
+        tracing::info!("{msg}");
+        if let Some(ref f) = cb { f(msg); }
+    };
     let media_path = config.media_path.canonicalize().map_err(|_| {
         format!("Media directory does not exist: {:?}", config.media_path)
     })?;
@@ -55,34 +74,29 @@ pub async fn start_server(
         }
     };
 
-    let msg = format!("Scanning media directory: {:?}", media_path);
-    tracing::info!("{msg}");
-    if let Some(ref cb) = log_callback { cb(&msg); }
+    log(&format!("Scanning media directory: {:?}", media_path), &log_cb);
 
     if media::is_ffprobe_available() {
-        tracing::info!("ffprobe detected");
+        log("ffprobe detected", &log_cb);
     }
     if media::is_ffmpeg_available() {
-        tracing::info!("ffmpeg detected");
+        log("ffmpeg detected", &log_cb);
     }
 
     let db = db::Database::new(&media_path)?;
     let lib = library::Library::scan(&media_path)?;
 
-    let msg = format!(
+    log(&format!(
         "Found {} series with {} episodes",
         lib.series.len(),
         lib.series.values().map(|s| s.episodes.len()).sum::<usize>()
-    );
-    tracing::info!("{msg}");
-    if let Some(ref cb) = log_callback { cb(&msg); }
+    ), &log_cb);
 
     let tmdb_client = config.tmdb_key.map(|key| {
-        tracing::info!("TMDB integration enabled");
+        log("TMDB integration enabled", &log_cb);
         tmdb::TmdbClient::new(key)
     });
 
-    // Fetch metadata on startup if needed
     if let Some(ref client) = tmdb_client {
         let series_info: Vec<(String, String, bool, bool, Option<u64>)> = lib
             .series.values()
@@ -93,13 +107,9 @@ pub async fn start_server(
             .any(|(id, _, has_art, has_backdrop, _)| !has_art || !has_backdrop || db.get_series_metadata(id).is_none());
 
         if needs_fetch {
-            let msg = "Fetching metadata from TMDB...";
-            tracing::info!("{msg}");
-            if let Some(ref cb) = log_callback { cb(msg); }
+            log("Fetching metadata from TMDB...", &log_cb);
             let downloaded = tmdb::fetch_all_metadata(client, &db, &media_path, series_info).await;
-            let msg = format!("Downloaded artwork for {downloaded} series");
-            tracing::info!("{msg}");
-            if let Some(ref cb) = log_callback { cb(&msg); }
+            log(&format!("Downloaded artwork for {downloaded} series"), &log_cb);
         }
     }
 
@@ -111,6 +121,8 @@ pub async fn start_server(
         media_path: media_path.clone(),
         tmdb: tmdb_client,
         active_streams: std::sync::Mutex::new(std::collections::HashSet::new()),
+        remuxing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        log: log_cb,
     });
 
     // mDNS advertisement
@@ -140,10 +152,10 @@ pub async fn start_server(
 
                     // Log if something changed
                     if new_series != prev_series_count || new_episodes != prev_episode_count {
-                        tracing::info!(
+                        rescan_state.log(&format!(
                             "Library updated: {} series, {} episodes (was {}, {})",
                             new_series, new_episodes, prev_series_count, prev_episode_count
-                        );
+                        ));
                         prev_series_count = new_series;
                         prev_episode_count = new_episodes;
                     }
@@ -159,12 +171,12 @@ pub async fn start_server(
 
                         if !series_needing_metadata.is_empty() {
                             let count = series_needing_metadata.len();
-                            tracing::info!("Fetching TMDB metadata for {count} series...");
+                            rescan_state.log(&format!("Fetching TMDB metadata for {count} series..."));
                             let downloaded = tmdb::fetch_all_metadata(
                                 client, &rescan_state.db, &rescan_path, series_needing_metadata
                             ).await;
                             if downloaded > 0 {
-                                tracing::info!("Downloaded artwork for {downloaded} series");
+                                rescan_state.log(&format!("Downloaded artwork for {downloaded} series"));
                             }
                             // Rescan again to pick up new art
                             if let Ok(updated_lib) = library::Library::scan(&rescan_path) {
@@ -186,6 +198,7 @@ pub async fn start_server(
     let remux_path = media_path.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        remux_state.log("Background remux task started");
         loop {
             let files_to_remux = {
                 let lib = remux_state.library.read().await;
@@ -205,6 +218,9 @@ pub async fn start_server(
                 files
             };
 
+            if !files_to_remux.is_empty() {
+                remux_state.log(&format!("Background remux: {} files need conversion", files_to_remux.len()));
+            }
             if files_to_remux.is_empty() {
                 tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                 continue;
@@ -214,7 +230,7 @@ pub async fn start_server(
                 if target.exists() { continue; }
 
                 let tmp_path = target.parent().unwrap().join(format!("{stem}.mp4.tmp"));
-                tracing::info!("Background remux: {:?}", source.file_name().unwrap());
+                remux_state.log(&format!("Remuxing: {}", source.file_name().unwrap().to_string_lossy()));
 
                 let source_clone = source.clone();
                 let tmp_clone = tmp_path.clone();
@@ -229,26 +245,26 @@ pub async fn start_server(
                     cmd.arg("-c:a").arg("aac").arg("-b:a").arg("192k").arg("-ac").arg("2")
                         .arg("-map").arg("0:v:0").arg("-map").arg("0:a:0")
                         .arg("-map").arg("0:s?").arg("-c:s").arg("mov_text")
-                        .arg("-movflags").arg("+faststart").arg("-y").arg(&tmp_clone)
+                        .arg("-movflags").arg("+faststart").arg("-f").arg("mp4").arg("-y").arg(&tmp_clone)
                         .output()
                 }).await;
 
                 match result {
                     Ok(Ok(output)) if output.status.success() => {
                         if std::fs::rename(&tmp_path, target).is_ok() {
-                            tracing::info!("Background remux complete: {:?}", target.file_name().unwrap());
+                            remux_state.log(&format!("Remux complete: {}", target.file_name().unwrap().to_string_lossy()));
                             let is_streaming = remux_state.active_streams.lock()
                                 .map(|s| s.contains(stem)).unwrap_or(false);
                             if !is_streaming {
                                 if std::fs::remove_file(source).is_ok() {
-                                    tracing::info!("Deleted original: {:?}", source.file_name().unwrap());
+                                    remux_state.log(&format!("Deleted original: {}", source.file_name().unwrap().to_string_lossy()));
                                 }
                             }
                         }
                     }
                     Ok(Ok(output)) => {
                         let stderr = String::from_utf8_lossy(&output.stderr);
-                        tracing::warn!("Background remux failed: {stderr}");
+                        remux_state.log(&format!("Remux failed: {}", stderr.lines().next().unwrap_or("unknown error")));
                         let _ = std::fs::remove_file(&tmp_path);
                     }
                     _ => break,
@@ -284,9 +300,7 @@ pub async fn start_server(
     let app = routes::create_router(state.clone());
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", config.port)).await?;
-    let msg = format!("Cast server listening on 0.0.0.0:{}", config.port);
-    tracing::info!("{msg}");
-    if let Some(ref cb) = log_callback { cb(&msg); }
+    state.log(&format!("Cast server listening on 0.0.0.0:{}", config.port));
 
     let handle = ServerHandle {
         state,

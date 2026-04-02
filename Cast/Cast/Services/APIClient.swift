@@ -124,6 +124,19 @@ struct APIClient {
         let _ = try await URLSession.shared.data(for: request)
     }
 
+    // MARK: - Playback Preparation
+
+    func prepareEpisode(episodeId: String) async throws -> PrepareResponse {
+        let url = baseURL.appendingPathComponent("api/episodes/\(episodeId)/prepare")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw CastError.networkError("Failed to prepare episode")
+        }
+        return try JSONDecoder().decode(PrepareResponse.self, from: data)
+    }
+
     // MARK: - People
 
     func getPersonDetail(personId: Int) async throws -> PersonDetail {

@@ -362,7 +362,8 @@ impl Library {
 
             video_files.sort_by_key(|e| e.file_name());
 
-            if video_files.is_empty() {
+            // Skip folders that aren't series (no videos, no art, no tmdb.txt)
+            if video_files.is_empty() && art.is_none() && backdrop.is_none() && tmdb_id_override.is_none() {
                 continue;
             }
 

@@ -951,7 +951,7 @@
             try {
                 await fetch(apiUrl(`/api/episodes/${episodeId}`), { method: 'DELETE' });
                 showToast('Episode deleted', title, 'success');
-                setTimeout(() => showDetail(seriesId), 1000);
+                showDetail(seriesId); // Refresh immediately — server rescans before returning
             } catch (e) {
                 showToast('Delete failed', String(e), 'error');
             }

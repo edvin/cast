@@ -378,6 +378,13 @@ impl Database {
         .ok()
     }
 
+    pub fn delete_series_metadata(&self, series_id: &str) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute("DELETE FROM series_metadata WHERE series_id = ?1", params![series_id]);
+        let _ = conn.execute("DELETE FROM episode_metadata WHERE series_id = ?1", params![series_id]);
+        let _ = conn.execute("DELETE FROM episode_credits WHERE series_id = ?1", params![series_id]);
+    }
+
     pub fn delete_progress(&self, episode_id: &str) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM watch_progress WHERE episode_id = ?1", params![episode_id])?;

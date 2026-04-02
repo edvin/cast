@@ -2,7 +2,7 @@ mod tray;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 
 /// Log entries stored in memory for the UI
 struct LogBuffer {
@@ -314,6 +314,16 @@ fn ingest_files(state: tauri::State<'_, DesktopState>, file_paths: Vec<String>) 
     }).collect()
 }
 
+#[tauri::command]
+fn play_file(state: tauri::State<'_, DesktopState>, file_path: String) -> Result<(), String> {
+    let config = state.config.lock().unwrap().clone();
+    let full_path = std::path::Path::new(&config.media_path).join(&file_path);
+    if !full_path.exists() {
+        return Err(format!("File not found: {}", full_path.display()));
+    }
+    open::that(&full_path).map_err(|e| format!("Failed to open: {e}"))
+}
+
 #[derive(serde::Serialize)]
 struct ServerStats {
     running: bool,
@@ -349,6 +359,7 @@ pub fn run() {
             get_server_stats,
             ingest_file,
             ingest_files,
+            play_file,
         ])
         .on_window_event(|window, event| {
             match event {

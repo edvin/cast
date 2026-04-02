@@ -92,6 +92,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/person/{person_id}", get(get_person))
         .route("/api/episodes/{episode_id}/prepare", post(prepare_episode))
         .route("/api/series/{series_id}/remux", post(remux_series))
+        .route("/api/series/{series_id}", delete(delete_series))
+        .route("/api/episodes/{episode_id}", delete(delete_episode))
         .layer(cors)
         .with_state(state)
 }
@@ -1296,6 +1298,79 @@ async fn remux_series(
     }
 
     Ok(Json(serde_json::json!({ "triggered": triggered })))
+}
+
+/// Delete a series and all its files
+async fn delete_series(
+    State(state): State<Arc<AppState>>,
+    Path(series_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let series_title = {
+        let lib = state.library.read().await;
+        let series = lib.find_series(&series_id)
+            .ok_or_else(|| ApiError::not_found("Series not found"))?;
+        series.title.clone()
+    };
+
+    // Delete the series folder
+    let series_dir = state.media_path.join(&series_title);
+    if series_dir.exists() {
+        std::fs::remove_dir_all(&series_dir)
+            .map_err(|e| ApiError::internal(&format!("Failed to delete: {e}")))?;
+    }
+
+    // Clean up DB metadata
+    state.db.delete_series_metadata(&series_id);
+
+    // Rescan
+    if let Ok(lib) = crate::library::Library::scan(&state.media_path) {
+        *state.library.write().await = lib;
+    }
+
+    state.log(&format!("Deleted series: {series_title}"));
+    Ok(Json(serde_json::json!({ "deleted": series_title })))
+}
+
+/// Delete a single episode file
+async fn delete_episode(
+    State(state): State<Arc<AppState>>,
+    Path(episode_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let file_path = {
+        let lib = state.library.read().await;
+        let (_series, episode) = lib.find_episode(&episode_id)
+            .ok_or_else(|| ApiError::not_found("Episode not found"))?;
+        state.media_path.join(&episode.path)
+    };
+
+    let filename = file_path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    if file_path.exists() {
+        std::fs::remove_file(&file_path)
+            .map_err(|e| ApiError::internal(&format!("Failed to delete: {e}")))?;
+    }
+
+    // Also delete the MP4 sibling if it exists
+    if let Some(stem) = file_path.file_stem() {
+        let mp4_sibling = file_path.parent().unwrap().join(format!("{}.mp4", stem.to_string_lossy()));
+        if mp4_sibling.exists() && mp4_sibling != file_path {
+            let _ = std::fs::remove_file(&mp4_sibling);
+        }
+    }
+
+    // Clean up progress
+    let _ = state.db.delete_progress(&episode_id);
+
+    // Rescan
+    if let Ok(lib) = crate::library::Library::scan(&state.media_path) {
+        *state.library.write().await = lib;
+    }
+
+    state.log(&format!("Deleted episode: {filename}"));
+    Ok(Json(serde_json::json!({ "deleted": filename })))
 }
 
 /// Get person detail with biography and filmography from TMDB

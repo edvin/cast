@@ -545,7 +545,8 @@
                         <div style="display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap;">
                             ${hasMkv ? `<button class="action-btn" onclick="remuxSeries('${detail.id}', this)">⚡ Remux All to MP4</button>` : ''}
                             <button class="action-btn" onclick="refreshMetadata('${detail.id}', this)">🔄 Refresh Metadata</button>
-                            <button class="action-btn danger" onclick="resetProgress('${detail.id}', this)">↩ Reset Watch Progress</button>
+                            <button class="action-btn danger" onclick="resetProgress('${detail.id}', this)">↩ Reset Progress</button>
+                            <button class="action-btn danger" onclick="deleteSeries('${detail.id}', '${esc(detail.title)}')">🗑 Delete Series</button>
                         </div>
 
                         <div class="episode-list">
@@ -577,6 +578,10 @@
                                             ${watched ? '<span class="watched">✓ Watched</span>' : ''}
                                             ${inProgress ? '<span class="in-progress">▶ ' + Math.round(ep.progress.position_secs / ep.progress.duration_secs * 100) + '%</span>' : ''}
                                             ${fmtClass === 'mkv' ? `<button class="action-btn-sm" onclick="event.stopPropagation(); prepareEp('${ep.id}', this)">Remux</button>` : ''}
+                                            <div style="display:flex;gap:4px;margin-top:2px;">
+                                                <button class="action-btn-sm" onclick="event.stopPropagation(); playEp('${esc(detail.title)}/${esc(ep.filename)}')">▶ Play</button>
+                                                <button class="action-btn-sm" style="color:#ff3b30;" onclick="event.stopPropagation(); deleteEp('${ep.id}', '${esc(ep.title)}', '${detail.id}')">✕</button>
+                                            </div>
                                         </div>
                                     </div>
                                 `;
@@ -666,6 +671,38 @@
             } catch (e) {
                 btn.textContent = 'Failed';
                 btn.disabled = false;
+            }
+        }
+
+        // --- Delete & Play ---
+        async function deleteSeries(seriesId, title) {
+            if (!confirm(`Delete "${title}" and all its episodes? This cannot be undone.`)) return;
+            try {
+                await fetch(apiUrl(`/api/series/${seriesId}`), { method: 'DELETE' });
+                closeDetail();
+                showToast('Series deleted', title, 'success');
+                setTimeout(loadLibrary, 1000);
+            } catch (e) {
+                showToast('Delete failed', String(e), 'error');
+            }
+        }
+
+        async function deleteEp(episodeId, title, seriesId) {
+            if (!confirm(`Delete "${title}"?`)) return;
+            try {
+                await fetch(apiUrl(`/api/episodes/${episodeId}`), { method: 'DELETE' });
+                showToast('Episode deleted', title, 'success');
+                setTimeout(() => showDetail(seriesId), 1000);
+            } catch (e) {
+                showToast('Delete failed', String(e), 'error');
+            }
+        }
+
+        async function playEp(relativePath) {
+            try {
+                await invoke('play_file', { filePath: relativePath });
+            } catch (e) {
+                showToast('Cannot play', String(e), 'error');
             }
         }
 

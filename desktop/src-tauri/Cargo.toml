@@ -17,6 +17,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
 chrono = "0.4"
+open = "5.3.3"
 
 [lints.clippy]
 needless_return = "warn"

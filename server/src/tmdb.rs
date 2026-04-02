@@ -476,13 +476,13 @@ pub async fn fetch_all_metadata(
     client: &TmdbClient,
     db: &crate::db::Database,
     media_root: &Path,
-    series_list: Vec<(String, String, bool, Option<u64>)>, // (series_id, folder_name, has_art, tmdb_id_override)
+    series_list: Vec<(String, String, bool, bool, Option<u64>)>, // (series_id, folder_name, has_art, has_backdrop, tmdb_id_override)
 ) -> usize {
     let mut downloaded = 0;
 
-    for (series_id, title, has_art, tmdb_id_override) in series_list {
-        // Check if we already have metadata for this series
-        if db.get_series_metadata(&series_id).is_some() && has_art {
+    for (series_id, title, has_art, has_backdrop, tmdb_id_override) in series_list {
+        // Check if we already have metadata, art, and backdrop
+        if db.get_series_metadata(&series_id).is_some() && has_art && has_backdrop {
             continue;
         }
 

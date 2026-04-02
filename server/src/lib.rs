@@ -84,13 +84,13 @@ pub async fn start_server(
 
     // Fetch metadata on startup if needed
     if let Some(ref client) = tmdb_client {
-        let series_info: Vec<(String, String, bool, Option<u64>)> = lib
+        let series_info: Vec<(String, String, bool, bool, Option<u64>)> = lib
             .series.values()
-            .map(|s| (s.id.clone(), s.title.clone(), s.art.is_some(), s.tmdb_id_override))
+            .map(|s| (s.id.clone(), s.title.clone(), s.art.is_some(), s.backdrop.is_some(), s.tmdb_id_override))
             .collect();
 
         let needs_fetch = series_info.iter()
-            .any(|(id, _, has_art, _)| !has_art || db.get_series_metadata(id).is_none());
+            .any(|(id, _, has_art, has_backdrop, _)| !has_art || !has_backdrop || db.get_series_metadata(id).is_none());
 
         if needs_fetch {
             let msg = "Fetching metadata from TMDB...";
@@ -122,15 +122,60 @@ pub async fn start_server(
         }
     });
 
-    // Periodic library rescan
+    // Periodic library rescan + TMDB metadata fetch for new series
     let rescan_state = state.clone();
     let rescan_path = media_path.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut prev_series_count = rescan_state.library.read().await.series.len();
+        let mut prev_episode_count: usize = rescan_state.library.read().await
+            .series.values().map(|s| s.episodes.len()).sum();
+
         loop {
             interval.tick().await;
             match library::Library::scan(&rescan_path) {
-                Ok(lib) => *rescan_state.library.write().await = lib,
+                Ok(lib) => {
+                    let new_series = lib.series.len();
+                    let new_episodes: usize = lib.series.values().map(|s| s.episodes.len()).sum();
+
+                    // Log if something changed
+                    if new_series != prev_series_count || new_episodes != prev_episode_count {
+                        tracing::info!(
+                            "Library updated: {} series, {} episodes (was {}, {})",
+                            new_series, new_episodes, prev_series_count, prev_episode_count
+                        );
+                        prev_series_count = new_series;
+                        prev_episode_count = new_episodes;
+                    }
+
+                    // Fetch TMDB metadata for series that don't have it yet
+                    if let Some(ref client) = rescan_state.tmdb {
+                        let series_needing_metadata: Vec<_> = lib.series.values()
+                            .filter(|s| {
+                                !s.art.is_some() || !s.backdrop.is_some() || rescan_state.db.get_series_metadata(&s.id).is_none()
+                            })
+                            .map(|s| (s.id.clone(), s.title.clone(), s.art.is_some(), s.backdrop.is_some(), s.tmdb_id_override))
+                            .collect();
+
+                        if !series_needing_metadata.is_empty() {
+                            let count = series_needing_metadata.len();
+                            tracing::info!("Fetching TMDB metadata for {count} series...");
+                            let downloaded = tmdb::fetch_all_metadata(
+                                client, &rescan_state.db, &rescan_path, series_needing_metadata
+                            ).await;
+                            if downloaded > 0 {
+                                tracing::info!("Downloaded artwork for {downloaded} series");
+                            }
+                            // Rescan again to pick up new art
+                            if let Ok(updated_lib) = library::Library::scan(&rescan_path) {
+                                *rescan_state.library.write().await = updated_lib;
+                                continue;
+                            }
+                        }
+                    }
+
+                    *rescan_state.library.write().await = lib;
+                }
                 Err(e) => tracing::warn!("Rescan failed: {e}"),
             }
         }

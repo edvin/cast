@@ -1002,11 +1002,11 @@ async fn fetch_metadata(State(state): State<Arc<AppState>>) -> ApiResult<Json<Fe
         ApiError::unavailable("TMDB API key not configured")
     })?;
 
-    let series_info: Vec<(String, String, bool, Option<u64>)> = {
+    let series_info: Vec<(String, String, bool, bool, Option<u64>)> = {
         let lib = state.library.read().await;
         lib.series
             .values()
-            .map(|s| (s.id.clone(), s.title.clone(), s.art.is_some(), s.tmdb_id_override))
+            .map(|s| (s.id.clone(), s.title.clone(), s.art.is_some(), s.backdrop.is_some(), s.tmdb_id_override))
             .collect()
     };
 

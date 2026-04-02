@@ -4,13 +4,16 @@ import Observation
 @Observable
 final class ServerConnection {
     var baseURL: URL?
+    var connectionLost = false
 
     private static let lastServerKey = "lastServerAddress"
+    private var healthCheckTask: Task<Void, Never>?
 
     func connect(host: String, port: UInt16) {
         baseURL = URL(string: "http://\(host):\(port)")
-        // Remember for next launch
+        connectionLost = false
         UserDefaults.standard.set("\(host):\(port)", forKey: Self.lastServerKey)
+        startHealthCheck()
     }
 
     func connect(address: String) {
@@ -21,10 +24,12 @@ final class ServerConnection {
     }
 
     func disconnect() {
+        healthCheckTask?.cancel()
+        healthCheckTask = nil
         baseURL = nil
+        connectionLost = false
     }
 
-    /// Try to reconnect to the last known server. Returns true if successful.
     func tryReconnectToLastServer() async -> Bool {
         guard let address = UserDefaults.standard.string(forKey: Self.lastServerKey) else {
             return false
@@ -46,5 +51,36 @@ final class ServerConnection {
         } catch {}
 
         return false
+    }
+
+    /// Periodic health check — pings the server every 30 seconds
+    private func startHealthCheck() {
+        healthCheckTask?.cancel()
+        healthCheckTask = Task { @MainActor in
+            var failCount = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                guard let url = baseURL?.appendingPathComponent("api/series") else { break }
+
+                do {
+                    let (_, response) = try await URLSession.shared.data(from: url)
+                    if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                        failCount = 0
+                        if connectionLost {
+                            connectionLost = false
+                        }
+                    } else {
+                        failCount += 1
+                    }
+                } catch {
+                    failCount += 1
+                }
+
+                // After 3 consecutive failures (90 seconds), mark as lost
+                if failCount >= 3 {
+                    connectionLost = true
+                }
+            }
+        }
     }
 }

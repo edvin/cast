@@ -413,7 +413,8 @@ pub fn run() {
         .on_window_event(|window, event| {
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
-                    let _ = window.hide();
+                    // Minimize to dock instead of quitting (server keeps running)
+                    let _ = window.minimize();
                     api.prevent_close();
                 }
                 tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) => {

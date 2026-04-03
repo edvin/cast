@@ -37,6 +37,9 @@
     },
     "publisher": "Edvin Syse",
     "category": "Utility",
-    "shortDescription": "Cast media server for Apple TV"
+    "shortDescription": "Cast media server for Apple TV",
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    }
   }
 }

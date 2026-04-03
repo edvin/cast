@@ -15,7 +15,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let _tray = TrayIconBuilder::new()
         .tooltip("Cast — Media Server")
         .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/tray-32x32.png")).expect("tray icon"))
-        .icon_as_template(cfg!(target_os = "macos"))
+        .icon_as_template(false)
         .menu(&menu)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => {

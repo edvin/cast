@@ -97,18 +97,21 @@
             border-color: #444;
             transform: translateY(-2px);
         }
+        .series-card { position: relative; height: 180px; }
         .series-card-image {
-            width: 100%;
-            height: 160px;
-            object-fit: cover;
+            width: 100%; height: 100%;
+            object-fit: cover; object-position: top;
             background: #111;
         }
-        .series-card-body { padding: 14px; }
-        .series-card-title { font-size: 14px; font-weight: 600; color: #fff; margin-bottom: 4px; }
-        .series-card-meta { font-size: 11px; color: #888; display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+        .series-card-body {
+            position: absolute; bottom: 0; left: 0; right: 0;
+            background: linear-gradient(transparent, rgba(0,0,0,0.9));
+            padding: 40px 14px 12px;
+        }
+        .series-card-title { font-size: 14px; font-weight: 600; color: #fff; text-shadow: 0 1px 4px rgba(0,0,0,0.6); margin-bottom: 3px; }
+        .series-card-meta { font-size: 10px; color: #ccc; display: flex; gap: 6px; align-items: center; text-shadow: 0 1px 3px rgba(0,0,0,0.5); }
         .series-card-meta .rating { color: #f5c518; }
-        .series-card-overview { font-size: 11px; color: #666; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-        .series-card-episodes { font-size: 11px; color: #0a84ff; margin-top: 8px; }
+        .series-card-episodes { font-size: 10px; color: #0a84ff; margin-top: 4px; text-shadow: 0 1px 3px rgba(0,0,0,0.5); }
 
         /* Series detail overlay */
         .detail-overlay {
@@ -121,21 +124,30 @@
             overflow: hidden; min-height: 100%;
         }
         .detail-hero {
-            position: relative; height: 250px; overflow: hidden;
+            position: relative; height: 350px; overflow: hidden;
         }
         .detail-hero img {
             width: 100%; height: 100%; object-fit: cover; object-position: top;
         }
         .detail-hero-gradient {
-            position: absolute; bottom: 0; left: 0; right: 0; height: 150px;
-            background: linear-gradient(transparent, #161616);
+            position: absolute; inset: 0;
+            background: linear-gradient(to right, rgba(0,0,0,0.8) 35%, rgba(0,0,0,0.2) 70%),
+                        linear-gradient(transparent 40%, #161616 100%);
         }
         .detail-hero-info {
-            position: absolute; bottom: 16px; left: 20px; right: 20px;
+            position: absolute; bottom: 0; left: 0; right: 0;
+            display: flex; align-items: flex-end; justify-content: space-between;
+            padding: 24px;
         }
-        .detail-hero-title { font-size: 24px; font-weight: 700; color: #fff; text-shadow: 0 2px 8px rgba(0,0,0,0.5); }
-        .detail-hero-meta { font-size: 12px; color: #aaa; margin-top: 4px; }
+        .detail-hero-left { max-width: 45%; }
+        .detail-hero-title { font-size: 28px; font-weight: 700; color: #fff; text-shadow: 0 2px 8px rgba(0,0,0,0.5); line-height: 1.2; }
+        .detail-hero-meta { font-size: 12px; color: #ccc; margin-top: 8px; text-shadow: 0 1px 4px rgba(0,0,0,0.5); }
         .detail-hero-meta .rating { color: #f5c518; }
+        .detail-hero-overview {
+            max-width: 50%; font-size: 12px; font-weight: 500; color: rgba(255,255,255,0.8);
+            line-height: 1.6; text-shadow: 0 1px 4px rgba(0,0,0,0.5);
+            display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden;
+        }
 
         .detail-body { padding: 20px; }
         .detail-overview { font-size: 13px; color: #999; line-height: 1.5; margin-bottom: 20px; }
@@ -160,15 +172,28 @@
         .ep-title { font-size: 13px; font-weight: 500; color: #eee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .ep-overview { font-size: 11px; color: #666; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
         .ep-meta { font-size: 10px; color: #555; margin-top: 3px; }
-        .ep-status { flex-shrink: 0; font-size: 11px; }
-        .ep-status .watched { color: #34c759; }
-        .ep-status .in-progress { color: #0a84ff; }
-        .ep-status .format-badge {
-            display: inline-block; padding: 2px 6px; border-radius: 4px;
-            font-size: 10px; font-weight: 600;
+        .ep-actions {
+            display: flex; align-items: center; gap: 8px; flex-shrink: 0;
         }
-        .ep-status .mp4 { background: #1a3a1a; color: #34c759; }
-        .ep-status .mkv { background: #3a2a1a; color: #ff9500; }
+        .ep-badge {
+            padding: 3px 10px; border-radius: 20px; font-size: 10px;
+            font-weight: 600; white-space: nowrap;
+        }
+        .watched-badge { background: #1a3a1a; color: #34c759; }
+        .progress-badge { background: #1a2a3a; color: #0a84ff; }
+        .format-badge { }
+        .format-badge.mp4 { background: #1a3a1a; color: #34c759; }
+        .format-badge.mkv { background: #3a2a1a; color: #ff9500; }
+        .ep-icon-btn {
+            width: 30px; height: 30px; border-radius: 50%; border: none;
+            background: transparent; cursor: pointer; font-size: 14px;
+            display: flex; align-items: center; justify-content: center;
+            transition: background 0.15s;
+        }
+        .ep-icon-btn:hover { background: rgba(255,255,255,0.1); }
+        .ep-icon-btn.delete-btn { opacity: 0.4; }
+        .ep-icon-btn.delete-btn:hover { opacity: 1; background: rgba(255,59,48,0.15); }
+        .ep-icon-btn.remux-btn:hover { background: rgba(255,149,0,0.15); }
 
         .series-empty {
             display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -210,6 +235,22 @@
         }
         .action-btn-sm:hover { background: #252525; color: #fff; }
         .action-btn-sm:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        .play-circle {
+            width: 40px; height: 40px; border-radius: 50%;
+            background: linear-gradient(135deg, #0a84ff, #0060df);
+            border: none; color: #fff;
+            font-size: 16px; cursor: pointer; display: flex;
+            align-items: center; justify-content: center;
+            padding-left: 3px; transition: all 0.2s;
+            box-shadow: 0 2px 8px rgba(10, 132, 255, 0.4);
+            flex-shrink: 0;
+        }
+        .play-circle:hover {
+            background: linear-gradient(135deg, #3a9fff, #0a84ff);
+            transform: scale(1.12);
+            box-shadow: 0 4px 16px rgba(10, 132, 255, 0.6);
+        }
 
         /* Drop overlay */
         .drop-overlay {
@@ -606,7 +647,6 @@
                                 ${s.rating ? `<span class="rating">★ ${s.rating.toFixed(1)}</span>` : ''}
                                 ${s.genres ? `<span>${esc(s.genres)}</span>` : ''}
                             </div>
-                            ${s.overview ? `<div class="series-card-overview">${esc(s.overview)}</div>` : ''}
                             <div class="series-card-episodes">${s.episode_count} episode${s.episode_count !== 1 ? 's' : ''} · ${s.watched_count} watched</div>
                         </div>
                     </div>
@@ -647,17 +687,19 @@
                         }
                         <div class="detail-hero-gradient"></div>
                         <div class="detail-hero-info">
-                            <div class="detail-hero-title">${esc(detail.title)}</div>
-                            <div class="detail-hero-meta">
-                                ${detail.year ? detail.year : ''}
-                                ${detail.genres ? ` · ${esc(detail.genres)}` : ''}
-                                ${detail.rating ? ` · <span class="rating">★ ${detail.rating.toFixed(1)}</span>` : ''}
-                                · ${formatSummary}
+                            <div class="detail-hero-left">
+                                <div class="detail-hero-title">${esc(detail.title)}</div>
+                                <div class="detail-hero-meta">
+                                    ${detail.year ? detail.year : ''}
+                                    ${detail.genres ? ` · ${esc(detail.genres)}` : ''}
+                                    ${detail.rating ? ` · <span class="rating">★ ${detail.rating.toFixed(1)}</span>` : ''}
+                                    · ${formatSummary}
+                                </div>
                             </div>
+                            ${detail.overview ? `<div class="detail-hero-overview">${esc(detail.overview)}</div>` : ''}
                         </div>
                     </div>
                     <div class="detail-body">
-                        ${detail.overview ? `<div class="detail-overview">${esc(detail.overview)}</div>` : ''}
 
                         <div style="display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap;">
                             ${hasMkv ? `<button class="action-btn" onclick="remuxSeries('${detail.id}', this)">⚡ Remux All to MP4</button>` : ''}
@@ -691,15 +733,17 @@
                                                 · <span style="font-size:9px;color:#666;">${esc(ep.filename)}</span>
                                             </div>
                                         </div>
-                                        <div class="ep-status" style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
-                                            <span class="format-badge ${fmtClass}">${fmt}</span>
-                                            ${watched ? '<span class="watched">✓ Watched</span>' : ''}
-                                            ${inProgress ? '<span class="in-progress">▶ ' + Math.round(ep.progress.position_secs / ep.progress.duration_secs * 100) + '%</span>' : ''}
-                                            ${fmtClass === 'mkv' ? `<button class="action-btn-sm" onclick="event.stopPropagation(); prepareEp('${ep.id}', this)">Remux</button>` : ''}
-                                            <div style="display:flex;gap:4px;margin-top:2px;">
-                                                <button class="action-btn-sm" onclick="event.stopPropagation(); playEp('${esc(detail.folder_name || detail.title)}/${esc(ep.filename)}')">▶ Play</button>
-                                                <button class="action-btn-sm" style="color:#ff3b30;" onclick="event.stopPropagation(); deleteEp('${ep.id}', '${esc(ep.title)}', '${detail.id}')" title="Delete episode">🗑</button>
-                                            </div>
+                                        <div class="ep-actions">
+                                            ${watched
+                                                ? '<div class="ep-badge watched-badge">✓ Watched</div>'
+                                                : inProgress
+                                                    ? '<div class="ep-badge progress-badge">▶ ' + Math.round(ep.progress.position_secs / ep.progress.duration_secs * 100) + '%</div>'
+                                                    : ''
+                                            }
+                                            <div class="ep-badge format-badge ${fmtClass}">${fmt}</div>
+                                            ${fmtClass === 'mkv' ? `<button class="ep-icon-btn remux-btn" onclick="event.stopPropagation(); prepareEp('${ep.id}', this)" title="Convert to MP4">⚡</button>` : ''}
+                                            <button class="ep-icon-btn delete-btn" onclick="event.stopPropagation(); deleteEp('${ep.id}', '${esc(ep.title)}', '${detail.id}')" title="Delete"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4h12M5.3 4V2.7a1 1 0 011-1h3.4a1 1 0 011 1V4M6 7v5M10 7v5M3.5 4l.7 9.3a1 1 0 001 .7h5.6a1 1 0 001-.7L12.5 4"/></svg></button>
+                                            <button class="play-circle" onclick="event.stopPropagation(); playEp('${esc(detail.folder_name || detail.title)}/${esc(ep.filename)}')" title="Play">▶</button>
                                         </div>
                                     </div>
                                 `;

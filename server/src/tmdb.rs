@@ -480,11 +480,14 @@ pub async fn fetch_all_metadata(
 ) -> usize {
     let mut downloaded = 0;
 
-    for (series_id, title, has_art, has_backdrop, tmdb_id_override) in series_list {
+    let total = series_list.len();
+    for (i, (series_id, title, has_art, has_backdrop, tmdb_id_override)) in series_list.into_iter().enumerate() {
         // Check if we already have metadata, art, and backdrop
         if db.get_series_metadata(&series_id).is_some() && has_art && has_backdrop {
             continue;
         }
+
+        tracing::info!("TMDB [{}/{}]: {}", i + 1, total, title);
 
         // Resolve series info: use override ID, cleaned name search, or raw name fallback
         let search_result = if let Some(tmdb_id) = tmdb_id_override {

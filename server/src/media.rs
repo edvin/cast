@@ -2,11 +2,36 @@ use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 
+/// Create a Command that won't open a visible console window on Windows.
+#[cfg(target_os = "windows")]
+fn silent_command(program: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let mut cmd = Command::new(program);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
+#[cfg(not(target_os = "windows"))]
+fn silent_command(program: &str) -> Command {
+    Command::new(program)
+}
+
+/// Create a pre-configured Command for ffmpeg (hidden console on Windows).
+pub fn ffmpeg_command() -> Command {
+    silent_command(&ffmpeg_cmd())
+}
+
+/// Create a pre-configured Command for ffprobe (hidden console on Windows).
+pub fn ffprobe_command() -> Command {
+    silent_command(&ffprobe_cmd())
+}
+
 /// Find the full path to an ffmpeg/ffprobe binary.
 /// Checks PATH first, then common install locations on Windows.
 pub fn find_tool(name: &str) -> Option<String> {
     // Try PATH first
-    if Command::new(name)
+    if silent_command(name)
         .arg("-version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -68,7 +93,7 @@ pub fn ffprobe_cmd() -> String {
 /// Returns `None` if ffprobe is not available, the command fails, or the
 /// duration field cannot be parsed.
 pub fn probe_duration(path: &Path) -> Option<f64> {
-    let output = Command::new(ffprobe_cmd())
+    let output = ffprobe_command()
         .args(["-v", "quiet", "-print_format", "json", "-show_format"])
         .arg(path)
         .output()
@@ -88,7 +113,7 @@ pub fn probe_duration(path: &Path) -> Option<f64> {
 /// default is 10% into the video or 30 seconds, whichever is less — the caller
 /// can compute that via [`probe_duration`].
 pub fn generate_thumbnail(video_path: &Path, output_path: &Path, timestamp_secs: f64) -> Result<(), std::io::Error> {
-    let status = Command::new(ffmpeg_cmd())
+    let status = ffmpeg_command()
         .args(["-ss", &format!("{timestamp_secs:.2}")])
         .arg("-i")
         .arg(video_path)

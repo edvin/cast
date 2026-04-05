@@ -557,7 +557,7 @@ pub fn needs_remux(path: &std::path::Path) -> bool {
 /// Check if the video stream needs transcoding (HEVC 10-bit, VP9, etc.)
 /// Returns ("copy", ...) for compatible codecs, ("libx264", ...) for incompatible ones.
 pub fn detect_video_codec(path: &std::path::Path) -> (&'static str, &'static str) {
-    let output = std::process::Command::new(crate::media::ffprobe_cmd())
+    let output = crate::media::ffprobe_command()
         .arg("-v").arg("quiet")
         .arg("-select_streams").arg("v:0")
         .arg("-show_entries").arg("stream=codec_name,pix_fmt")
@@ -674,7 +674,7 @@ async fn stream_episode(
         }
         // Note: we should unregister when streaming ends, but since the stream is consumed
         // by the client, the active_streams entry is cleaned up by the cleanup task.
-        return stream_remuxed(file_path, headers, file_size).await;
+        return stream_remuxed(file_path, headers, file_size, state.remuxing.clone()).await;
     }
 
     let content_type = mime_guess::from_path(&file_path).first_or_octet_stream().to_string();
@@ -688,9 +688,10 @@ async fn stream_remuxed(
     file_path: std::path::PathBuf,
     headers: HeaderMap,
     _file_size: u64,
+    remuxing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 ) -> ApiResult<Response> {
     let parent = file_path.parent().unwrap();
-    let stem = file_path.file_stem().unwrap_or_default().to_string_lossy();
+    let stem = file_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
     let sibling_mp4 = parent.join(format!("{stem}.mp4"));
     let legacy_mp4 = parent.join(".remux").join(format!("{stem}.mp4"));
 
@@ -709,12 +710,22 @@ async fn stream_remuxed(
         return serve_file(cached_path, &headers, file_size, "video/mp4").await;
     }
 
+    // Mark as remuxing so background/on-demand paths don't start a duplicate
+    if let Ok(mut set) = remuxing.lock() {
+        if set.contains(&stem) {
+            // Another path is already remuxing — wait for the .tmp file to appear,
+            // then let the client retry when it's ready
+            return Err(ApiError::internal("File is already being remuxed, try again shortly"));
+        }
+        set.insert(stem.clone());
+    }
+
     // Not cached — stream directly from ffmpeg as fragmented MP4 (instant start)
     // and tee the output to a cache file for future plays
     let (video_codec, video_extra) = detect_video_codec(&file_path);
     tracing::info!("Streaming+caching {:?} (video: {})", file_path.file_name().unwrap(), video_codec);
 
-    let mut cmd = std::process::Command::new(crate::media::ffmpeg_cmd());
+    let mut cmd = crate::media::ffmpeg_command();
     cmd.arg("-hide_banner")
         .arg("-loglevel").arg("warning")
         .arg("-i").arg(&file_path)
@@ -768,6 +779,8 @@ async fn stream_remuxed(
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(32);
 
+    let remuxing_cleanup = remuxing;
+    let stem_cleanup = stem;
     std::thread::spawn(move || {
         use std::io::{Read, Write};
         let mut stdout = stdout;
@@ -808,6 +821,8 @@ async fn stream_remuxed(
                 }
             }
         }
+        // Unmark from remuxing set
+        if let Ok(mut set) = remuxing_cleanup.lock() { set.remove(&stem_cleanup); }
     });
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -1199,7 +1214,7 @@ async fn prepare_episode(
         let (video_codec, video_extra) = detect_video_codec(&file_path_clone);
         tracing::info!("On-demand remux: {:?} (video: {video_codec})", file_path_clone.file_name().unwrap());
 
-        let mut cmd = std::process::Command::new(crate::media::ffmpeg_cmd());
+        let mut cmd = crate::media::ffmpeg_command();
         cmd.arg("-hide_banner").arg("-loglevel").arg("warning")
             .arg("-i").arg(&file_path_clone).arg("-c:v").arg(video_codec);
         if video_codec != "copy" {
@@ -1272,7 +1287,7 @@ async fn remux_series(
                     tokio::task::spawn_blocking(move || {
                         let (video_codec, video_extra) = detect_video_codec(&ep_path_clone);
                         tracing::info!("Batch remux: {:?} (video: {video_codec})", ep_path_clone.file_name().unwrap());
-                        let mut cmd = std::process::Command::new(crate::media::ffmpeg_cmd());
+                        let mut cmd = crate::media::ffmpeg_command();
                         cmd.arg("-hide_banner").arg("-loglevel").arg("warning")
                             .arg("-i").arg(&ep_path_clone).arg("-c:v").arg(video_codec);
                         if video_codec != "copy" {

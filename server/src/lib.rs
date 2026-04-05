@@ -103,11 +103,12 @@ pub async fn start_server(
             .map(|s| (s.id.clone(), s.title.clone(), s.art.is_some(), s.backdrop.is_some(), s.tmdb_id_override))
             .collect();
 
-        let needs_fetch = series_info.iter()
-            .any(|(id, _, has_art, has_backdrop, _)| !has_art || !has_backdrop || db.get_series_metadata(id).is_none());
+        let needs_fetch_count = series_info.iter()
+            .filter(|(id, _, has_art, has_backdrop, _)| !has_art || !has_backdrop || db.get_series_metadata(id).is_none())
+            .count();
 
-        if needs_fetch {
-            log("Fetching metadata from TMDB...", &log_cb);
+        if needs_fetch_count > 0 {
+            log(&format!("Fetching TMDB metadata for {needs_fetch_count} series..."), &log_cb);
             let downloaded = tmdb::fetch_all_metadata(client, &db, &media_path, series_info).await;
             if downloaded > 0 {
                 log(&format!("Downloaded artwork for {downloaded} series"), &log_cb);
@@ -213,7 +214,8 @@ pub async fn start_server(
                         if routes::needs_remux(&ep_path) {
                             let stem = ep_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
                             let mp4_path = ep_path.parent().unwrap().join(format!("{stem}.mp4"));
-                            if !mp4_path.exists() {
+                            let tmp_path = ep_path.parent().unwrap().join(format!("{stem}.mp4.tmp"));
+                            if !mp4_path.exists() && !tmp_path.exists() {
                                 files.push((ep_path, mp4_path, stem));
                             }
                         }
@@ -232,6 +234,15 @@ pub async fn start_server(
             for (source, target, stem) in &files_to_remux {
                 if target.exists() { continue; }
 
+                // Skip if another path (on-demand, streaming, batch) is already remuxing this file
+                {
+                    let mut set = remux_state.remuxing.lock().unwrap();
+                    if set.contains(stem) {
+                        continue;
+                    }
+                    set.insert(stem.clone());
+                }
+
                 let tmp_path = target.parent().unwrap().join(format!("{stem}.mp4.tmp"));
                 let (video_codec, video_extra) = routes::detect_video_codec(source);
                 let action = if video_codec == "copy" { "Remuxing" } else { "Transcoding" };
@@ -244,7 +255,7 @@ pub async fn start_server(
                 let result = tokio::task::spawn_blocking(move || {
                     let video_codec = vc.as_str();
                     let video_extra = ve.as_str();
-                    let mut cmd = std::process::Command::new(media::ffmpeg_cmd());
+                    let mut cmd = media::ffmpeg_command();
                     cmd.arg("-hide_banner").arg("-loglevel").arg("warning")
                         .arg("-i").arg(&source_clone).arg("-c:v").arg(video_codec);
                     if video_codec != "copy" {
@@ -275,8 +286,12 @@ pub async fn start_server(
                         remux_state.log(&format!("{action} failed: {}", stderr.lines().next().unwrap_or("unknown error")));
                         let _ = std::fs::remove_file(&tmp_path);
                     }
-                    _ => break,
+                    _ => {
+                        if let Ok(mut set) = remux_state.remuxing.lock() { set.remove(stem); }
+                        break;
+                    }
                 }
+                if let Ok(mut set) = remux_state.remuxing.lock() { set.remove(stem); }
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
 

@@ -1175,7 +1175,11 @@ async fn fetch_metadata(State(state): State<Arc<AppState>>) -> ApiResult<Json<Fe
     };
 
     let total = series_info.len();
-    let downloaded = crate::tmdb::fetch_all_metadata(client, &state.db, &state.media_path, series_info).await;
+    let log_state = state.clone();
+    let downloaded = crate::tmdb::fetch_all_metadata(client, &state.db, &state.media_path, series_info, move |msg| {
+        log_state.log(msg)
+    })
+    .await;
 
     // Rescan library to pick up new art files
     match crate::library::Library::scan(&state.media_path) {
@@ -1616,8 +1620,12 @@ async fn rescan_library(State(state): State<Arc<AppState>>) -> ApiResult<Json<se
                 if !needs_meta.is_empty() {
                     let count = needs_meta.len();
                     state.log(&format!("Fetching TMDB metadata for {count} series..."));
+                    let log_state = state.clone();
                     let downloaded =
-                        crate::tmdb::fetch_all_metadata(client, &state.db, &state.media_path, needs_meta).await;
+                        crate::tmdb::fetch_all_metadata(client, &state.db, &state.media_path, needs_meta, move |msg| {
+                            log_state.log(msg)
+                        })
+                        .await;
                     if downloaded > 0 {
                         state.log(&format!("Downloaded artwork for {downloaded} series"));
                     }

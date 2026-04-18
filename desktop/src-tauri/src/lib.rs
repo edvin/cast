@@ -534,11 +534,13 @@ pub fn run() {
                     logs.lock()
                         .unwrap()
                         .push("Starting Cast server...".to_string());
+                    let _ = app_handle.emit("server-log", "Starting Cast server...");
 
                     match cast_server::start_server(server_config, Some(log_cb)).await {
                         Ok(_handle) => {
                             *server_running.lock().unwrap() = true;
                             logs.lock().unwrap().push("Server is running".to_string());
+                            let _ = app_handle.emit("server-log", "Server is running");
                             let _ = app_handle.emit("server-status", true);
                         }
                         Err(e) => {

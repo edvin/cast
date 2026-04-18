@@ -489,12 +489,14 @@ pub fn clean_search_query(folder_name: &str) -> String {
     s.trim().to_string()
 }
 
-/// Fetch metadata for all series, download art, and store metadata in DB
+/// Fetch metadata for all series, download art, and store metadata in DB.
+/// `log` is invoked for per-series progress so it shows up in the desktop UI log.
 pub async fn fetch_all_metadata(
     client: &TmdbClient,
     db: &crate::db::Database,
     media_root: &Path,
     series_list: Vec<(String, String, bool, bool, Option<u64>)>, // (series_id, folder_name, has_art, has_backdrop, tmdb_id_override)
+    log: impl Fn(&str),
 ) -> usize {
     let mut downloaded = 0;
 
@@ -505,7 +507,9 @@ pub async fn fetch_all_metadata(
             continue;
         }
 
-        tracing::info!("TMDB [{}/{}]: {}", i + 1, total, title);
+        let progress_msg = format!("TMDB [{}/{}]: {}", i + 1, total, title);
+        tracing::info!("{progress_msg}");
+        log(&progress_msg);
 
         // Resolve series info: use override ID, cleaned name search, or raw name fallback
         let search_result = if let Some(tmdb_id) = tmdb_id_override {
@@ -603,10 +607,14 @@ pub async fn fetch_all_metadata(
                 tracing::info!("Fetched metadata for '{title}' (TMDB ID: {})", info.tmdb_id);
             }
             Ok(None) => {
-                tracing::info!("No TMDB match found for '{title}'");
+                let msg = format!("No TMDB match for '{title}' (check folder name or add tmdb.txt)");
+                tracing::info!("{msg}");
+                log(&msg);
             }
             Err(e) => {
-                tracing::warn!("TMDB search failed for '{title}': {e}");
+                let msg = format!("TMDB search failed for '{title}': {e}");
+                tracing::warn!("{msg}");
+                log(&msg);
             }
         }
     }

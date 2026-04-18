@@ -12,6 +12,9 @@ use tokio::sync::RwLock;
 
 pub type LogCallback = Arc<dyn Fn(&str) + Send + Sync>;
 pub type BoxedLogCallback = Box<dyn Fn(&str) + Send + Sync>;
+/// One entry per series that needs TMDB metadata fetching.
+/// Fields: (series_id, folder_name, has_art, has_backdrop, tmdb_id_override)
+pub type TmdbFetchEntry = (String, String, bool, bool, Option<u64>);
 
 pub struct AppState {
     pub library: RwLock<library::Library>,
@@ -104,10 +107,13 @@ pub async fn start_server(
         tmdb::TmdbClient::new(key)
     });
 
-    if let Some(ref client) = tmdb_client {
-        let series_info: Vec<(String, String, bool, bool, Option<u64>)> = lib
-            .series
+    // Collect the initial list of series that need TMDB fetching. We don't block startup
+    // on the fetch itself — the HTTP listener and background remux start immediately and
+    // the fetch runs in a spawned task so the Logs UI sees per-series progress in parallel.
+    let initial_tmdb_work: Option<Vec<TmdbFetchEntry>> = tmdb_client.as_ref().map(|_| {
+        lib.series
             .values()
+            .filter(|s| s.art.is_none() || s.backdrop.is_none() || db.get_series_metadata(&s.id).is_none())
             .map(|s| {
                 (
                     s.id.clone(),
@@ -117,29 +123,8 @@ pub async fn start_server(
                     s.tmdb_id_override,
                 )
             })
-            .collect();
-
-        let needs_fetch_count = series_info
-            .iter()
-            .filter(|(id, _, has_art, has_backdrop, _)| {
-                !has_art || !has_backdrop || db.get_series_metadata(id).is_none()
-            })
-            .count();
-
-        if needs_fetch_count > 0 {
-            log(
-                &format!("Fetching TMDB metadata for {needs_fetch_count} series..."),
-                &log_cb,
-            );
-            let downloaded = tmdb::fetch_all_metadata(client, &db, &media_path, series_info).await;
-            if downloaded > 0 {
-                log(&format!("Downloaded artwork for {downloaded} series"), &log_cb);
-            }
-            log("TMDB metadata fetch complete", &log_cb);
-        }
-    }
-
-    let lib = library::Library::scan(&media_path)?;
+            .collect()
+    });
 
     let state = Arc::new(AppState {
         library: RwLock::new(lib),
@@ -150,6 +135,35 @@ pub async fn start_server(
         remuxing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         log: log_cb,
     });
+
+    // Kick off the initial TMDB fetch in the background (if needed). Progress lines flow
+    // to the UI via state.log. After the fetch completes the library is rescanned so the
+    // newly downloaded art files are picked up.
+    if let Some(work) = initial_tmdb_work {
+        if !work.is_empty() && state.tmdb.is_some() {
+            let tmdb_state = state.clone();
+            let tmdb_path = media_path.clone();
+            tokio::spawn(async move {
+                let client = match tmdb_state.tmdb.as_ref() {
+                    Some(c) => c,
+                    None => return,
+                };
+                let count = work.len();
+                tmdb_state.log(&format!("Fetching TMDB metadata for {count} series..."));
+                let log_state = tmdb_state.clone();
+                let downloaded =
+                    tmdb::fetch_all_metadata(client, &tmdb_state.db, &tmdb_path, work, move |msg| log_state.log(msg))
+                        .await;
+                if downloaded > 0 {
+                    tmdb_state.log(&format!("Downloaded artwork for {downloaded} series"));
+                }
+                tmdb_state.log("TMDB metadata fetch complete");
+                if let Ok(updated) = library::Library::scan(&tmdb_path) {
+                    *tmdb_state.library.write().await = updated;
+                }
+            });
+        }
+    }
 
     // mDNS advertisement
     let mdns_name = config.name.clone();
@@ -215,11 +229,13 @@ pub async fn start_server(
                         if !series_needing_metadata.is_empty() {
                             let count = series_needing_metadata.len();
                             rescan_state.log(&format!("Fetching TMDB metadata for {count} series..."));
+                            let log_state = rescan_state.clone();
                             let downloaded = tmdb::fetch_all_metadata(
                                 client,
                                 &rescan_state.db,
                                 &rescan_path,
                                 series_needing_metadata,
+                                move |msg| log_state.log(msg),
                             )
                             .await;
                             if downloaded > 0 {
@@ -245,7 +261,8 @@ pub async fn start_server(
     let remux_state = state.clone();
     let remux_path = media_path.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        // Short grace period so startup log lines can land first, then begin work immediately.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         remux_state.log("Background remux task started");
         loop {
             let files_to_remux = {
@@ -272,9 +289,10 @@ pub async fn start_server(
                 tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                 continue;
             }
-            remux_state.log(&format!("{} files need conversion", files_to_remux.len()));
+            let total_files = files_to_remux.len();
+            remux_state.log(&format!("{total_files} files need conversion"));
 
-            for (source, target, stem) in &files_to_remux {
+            for (index, (source, target, stem)) in files_to_remux.iter().enumerate() {
                 if target.exists() {
                     continue;
                 }
@@ -295,7 +313,38 @@ pub async fn start_server(
                 } else {
                     "Transcoding"
                 };
-                remux_state.log(&format!("{action}: {}", source.file_name().unwrap().to_string_lossy()));
+                remux_state.log(&format!(
+                    "{action} [{}/{}]: {}",
+                    index + 1,
+                    total_files,
+                    source.file_name().unwrap().to_string_lossy()
+                ));
+
+                // Heartbeat: while ffmpeg is running, periodically log the .tmp file size so
+                // users can see progress for long transcodes instead of silence.
+                let source_size = std::fs::metadata(source).map(|m| m.len()).unwrap_or(0);
+                let hb_tmp = tmp_path.clone();
+                let hb_state = remux_state.clone();
+                let hb_label = format!(
+                    "{action} [{}/{}]: {}",
+                    index + 1,
+                    total_files,
+                    source.file_name().unwrap().to_string_lossy()
+                );
+                let heartbeat = tokio::spawn(async move {
+                    let mut ticks: u32 = 0;
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        ticks += 1;
+                        let tmp_size = std::fs::metadata(&hb_tmp).map(|m| m.len()).unwrap_or(0);
+                        if source_size > 0 {
+                            let pct = ((tmp_size as f64 / source_size as f64) * 100.0).min(99.0) as u32;
+                            hb_state.log(&format!("  {hb_label} — {pct}% ({}s elapsed)", ticks * 30));
+                        } else {
+                            hb_state.log(&format!("  {hb_label} — {}s elapsed", ticks * 30));
+                        }
+                    }
+                });
 
                 let source_clone = source.clone();
                 let tmp_clone = tmp_path.clone();
@@ -340,12 +389,15 @@ pub async fn start_server(
                         .output()
                 })
                 .await;
+                heartbeat.abort();
 
                 match result {
                     Ok(Ok(output)) if output.status.success() => {
                         if std::fs::rename(&tmp_path, target).is_ok() {
                             remux_state.log(&format!(
-                                "{action} complete: {}",
+                                "{action} complete [{}/{}]: {}",
+                                index + 1,
+                                total_files,
                                 target.file_name().unwrap().to_string_lossy()
                             ));
                             let is_streaming = remux_state

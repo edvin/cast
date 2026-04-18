@@ -27,8 +27,9 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Log a message to both tracing and the UI callback
+    /// Log a message to stderr, tracing, and the UI callback.
     pub fn log(&self, msg: &str) {
+        eprintln!("[cast] {msg}");
         tracing::info!("{msg}");
         if let Some(ref cb) = self.log {
             cb(msg);
@@ -58,16 +59,31 @@ pub async fn start_server(
     log_callback: Option<BoxedLogCallback>,
 ) -> Result<ServerHandle, Box<dyn std::error::Error>> {
     let log_cb: Option<LogCallback> = log_callback.map(|cb| Arc::from(cb) as LogCallback);
+    // Every log line goes through this closure: stderr (for CLI), tracing (for env-filter
+    // consumers), and the UI callback (the desktop app's Logs tab).
     let log = |msg: &str, cb: &Option<LogCallback>| {
+        eprintln!("[cast] {msg}");
         tracing::info!("{msg}");
         if let Some(ref f) = cb {
             f(msg);
         }
     };
-    let media_path = config
-        .media_path
-        .canonicalize()
-        .map_err(|_| format!("Media directory does not exist: {:?}", config.media_path))?;
+
+    // Canary: prove the callback plumbing works. If the user doesn't see this line in
+    // the desktop Logs tab, the issue is the callback itself, not a later hang.
+    log(
+        &format!(
+            "Cast server v{} starting (log callback wired)",
+            env!("CARGO_PKG_VERSION")
+        ),
+        &log_cb,
+    );
+
+    let media_path = config.media_path.canonicalize().map_err(|e| {
+        let msg = format!("Media directory does not exist: {:?} ({e})", config.media_path);
+        log(&msg, &log_cb);
+        msg
+    })?;
 
     // On Windows, canonicalize() returns \\?\ extended-length paths which break ffmpeg.
     // Strip the prefix to get a normal path.
@@ -83,15 +99,36 @@ pub async fn start_server(
 
     log(&format!("Scanning media directory: {media_path:?}"), &log_cb);
 
+    log("Checking for ffprobe...", &log_cb);
     if media::is_ffprobe_available() {
         log("ffprobe detected", &log_cb);
+    } else {
+        log("ffprobe NOT found in PATH (thumbnails/duration disabled)", &log_cb);
     }
+    log("Checking for ffmpeg...", &log_cb);
     if media::is_ffmpeg_available() {
         log("ffmpeg detected", &log_cb);
+    } else {
+        log(
+            "ffmpeg NOT found in PATH (playback will fail for non-MP4 files)",
+            &log_cb,
+        );
     }
 
-    let db = db::Database::new(&media_path)?;
-    let lib = library::Library::scan(&media_path)?;
+    log("Opening cast.db...", &log_cb);
+    let db = db::Database::new(&media_path).map_err(|e| {
+        let msg = format!("Failed to open cast.db: {e}");
+        log(&msg, &log_cb);
+        msg
+    })?;
+    log("cast.db ready", &log_cb);
+
+    log("Scanning library on disk...", &log_cb);
+    let lib = library::Library::scan(&media_path).map_err(|e| {
+        let msg = format!("Library scan failed: {e}");
+        log(&msg, &log_cb);
+        msg
+    })?;
 
     log(
         &format!(

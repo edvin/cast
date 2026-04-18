@@ -1413,7 +1413,9 @@ async fn prepare_episode(
     }))
 }
 
-/// Trigger remux for all MKV episodes in a series
+/// Trigger remux for all MKV episodes in a series.
+/// Episodes are enqueued and processed one at a time so we don't spawn N ffmpeg
+/// processes in parallel — that would peg the CPU and disk.
 async fn remux_series(
     State(state): State<Arc<AppState>>,
     Path(series_id): Path<String>,
@@ -1423,103 +1425,160 @@ async fn remux_series(
         .find_series(&series_id)
         .ok_or_else(|| ApiError::not_found("Series not found"))?;
 
-    let mut triggered = 0;
+    state.log(&format!(
+        "Manual remux requested for series '{}' ({} episodes)",
+        series.title,
+        series.episodes.len()
+    ));
+
+    // Collect jobs synchronously, then kick off a single worker that processes them
+    // sequentially. Reserving each stem in `state.remuxing` up front prevents the
+    // background task, on-demand prepare and streaming paths from duplicating work.
+    let mut jobs: Vec<(std::path::PathBuf, std::path::PathBuf, String)> = Vec::new();
+    let mut already_mp4 = 0;
+    let mut already_done = 0;
+    let mut already_running = 0;
     for ep in &series.episodes {
         let ep_path = state.media_path.join(&ep.path);
-        if needs_remux(&ep_path) {
-            let stem = ep_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-            let mp4_path = ep_path.parent().unwrap().join(format!("{stem}.mp4"));
-            if !mp4_path.exists() {
-                // Trigger prepare for each episode
-                let tmp_path = ep_path.parent().unwrap().join(format!("{stem}.mp4.tmp"));
-                if !tmp_path.exists() {
-                    if let Ok(mut set) = state.remuxing.lock() {
-                        if set.contains(&stem) {
-                            continue;
+        if !needs_remux(&ep_path) {
+            already_mp4 += 1;
+            continue;
+        }
+        let stem = ep_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let parent = match ep_path.parent() {
+            Some(p) => p,
+            None => continue,
+        };
+        let mp4_path = parent.join(format!("{stem}.mp4"));
+        if mp4_path.exists() {
+            already_done += 1;
+            continue;
+        }
+        let tmp_path = parent.join(format!("{stem}.mp4.tmp"));
+        if tmp_path.exists() {
+            already_running += 1;
+            continue;
+        }
+        let reserved = {
+            let mut set = match state.remuxing.lock() {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if set.contains(&stem) {
+                false
+            } else {
+                set.insert(stem.clone());
+                true
+            }
+        };
+        if !reserved {
+            already_running += 1;
+            continue;
+        }
+        jobs.push((ep_path, mp4_path, stem));
+    }
+
+    let triggered = jobs.len();
+    state.log(&format!(
+        "Manual remux queued {triggered} episode(s) (already MP4: {already_mp4}, already remuxed: {already_done}, already running: {already_running}) — processing one at a time"
+    ));
+    drop(lib);
+
+    if !jobs.is_empty() {
+        let worker_state = state.clone();
+        tokio::spawn(async move {
+            let total = jobs.len();
+            for (index, (ep_path, mp4_path, stem)) in jobs.into_iter().enumerate() {
+                let tmp_path = mp4_path.with_extension("mp4.tmp");
+                let log_state = worker_state.clone();
+                let remuxing_ref = worker_state.remuxing.clone();
+                let ep_path_clone = ep_path.clone();
+                let tmp_clone = tmp_path.clone();
+                let mp4_clone = mp4_path.clone();
+                let stem_clone = stem.clone();
+
+                let result = tokio::task::spawn_blocking(move || {
+                    let (video_codec, video_extra) = detect_video_codec(&ep_path_clone);
+                    log_state.log(&format!(
+                        "Batch remux [{}/{total}]: {} (video: {video_codec})",
+                        index + 1,
+                        ep_path_clone.file_name().unwrap().to_string_lossy()
+                    ));
+                    let mut cmd = crate::media::ffmpeg_command();
+                    cmd.arg("-hide_banner")
+                        .arg("-loglevel")
+                        .arg("warning")
+                        .arg("-i")
+                        .arg(&ep_path_clone)
+                        .arg("-c:v")
+                        .arg(video_codec);
+                    if video_codec != "copy" {
+                        for part in video_extra.split_whitespace() {
+                            cmd.arg(part);
                         }
-                        set.insert(stem.clone());
                     }
-
-                    let ep_path_clone = ep_path.clone();
-                    let tmp_clone = tmp_path.clone();
-                    let mp4_clone = mp4_path.clone();
-                    let remuxing_ref = state.remuxing.clone();
-                    let stem_clone = stem.clone();
-                    let log_state = state.clone();
-
-                    tokio::task::spawn_blocking(move || {
-                        let (video_codec, video_extra) = detect_video_codec(&ep_path_clone);
-                        log_state.log(&format!(
-                            "Batch remux: {} (video: {video_codec})",
-                            ep_path_clone.file_name().unwrap().to_string_lossy()
-                        ));
-                        let mut cmd = crate::media::ffmpeg_command();
-                        cmd.arg("-hide_banner")
-                            .arg("-loglevel")
-                            .arg("warning")
-                            .arg("-i")
-                            .arg(&ep_path_clone)
-                            .arg("-c:v")
-                            .arg(video_codec);
-                        if video_codec != "copy" {
-                            for part in video_extra.split_whitespace() {
-                                cmd.arg(part);
-                            }
-                        }
-                        let output = cmd
-                            .arg("-c:a")
-                            .arg("aac")
-                            .arg("-b:a")
-                            .arg("192k")
-                            .arg("-ac")
-                            .arg("2")
-                            .arg("-map")
-                            .arg("0:v:0")
-                            .arg("-map")
-                            .arg("0:a:0")
-                            .arg("-map")
-                            .arg("0:s?")
-                            .arg("-c:s")
-                            .arg("mov_text")
-                            .arg("-movflags")
-                            .arg("+faststart")
-                            .arg("-f")
-                            .arg("mp4")
-                            .arg("-y")
-                            .arg(&tmp_clone)
-                            .output();
-                        match output {
-                            Ok(result) if result.status.success() => {
-                                if std::fs::rename(&tmp_clone, &mp4_clone).is_ok() {
-                                    log_state.log(&format!(
-                                        "Batch remux complete: {}",
-                                        mp4_clone.file_name().unwrap().to_string_lossy()
-                                    ));
-                                    let _ = std::fs::remove_file(&ep_path_clone);
-                                }
-                            }
-                            Ok(result) => {
-                                let stderr = String::from_utf8_lossy(&result.stderr);
+                    let output = cmd
+                        .arg("-c:a")
+                        .arg("aac")
+                        .arg("-b:a")
+                        .arg("192k")
+                        .arg("-ac")
+                        .arg("2")
+                        .arg("-map")
+                        .arg("0:v:0")
+                        .arg("-map")
+                        .arg("0:a:0")
+                        .arg("-map")
+                        .arg("0:s?")
+                        .arg("-c:s")
+                        .arg("mov_text")
+                        .arg("-movflags")
+                        .arg("+faststart")
+                        .arg("-f")
+                        .arg("mp4")
+                        .arg("-y")
+                        .arg(&tmp_clone)
+                        .output();
+                    match output {
+                        Ok(result) if result.status.success() => {
+                            if std::fs::rename(&tmp_clone, &mp4_clone).is_ok() {
                                 log_state.log(&format!(
-                                    "Batch remux failed: {}",
-                                    stderr.lines().next().unwrap_or("unknown error")
+                                    "Batch remux complete [{}/{total}]: {}",
+                                    index + 1,
+                                    mp4_clone.file_name().unwrap().to_string_lossy()
                                 ));
-                                let _ = std::fs::remove_file(&tmp_clone);
-                            }
-                            Err(e) => {
-                                log_state.log(&format!("ffmpeg not available: {e}"));
-                                let _ = std::fs::remove_file(&tmp_clone);
+                                let _ = std::fs::remove_file(&ep_path_clone);
                             }
                         }
-                        if let Ok(mut set) = remuxing_ref.lock() {
-                            set.remove(&stem_clone);
+                        Ok(result) => {
+                            let stderr = String::from_utf8_lossy(&result.stderr);
+                            log_state.log(&format!(
+                                "Batch remux failed [{}/{total}]: {}",
+                                index + 1,
+                                stderr.lines().next().unwrap_or("unknown error")
+                            ));
+                            let _ = std::fs::remove_file(&tmp_clone);
                         }
-                    });
+                        Err(e) => {
+                            log_state.log(&format!("ffmpeg not available: {e}"));
+                            let _ = std::fs::remove_file(&tmp_clone);
+                        }
+                    }
+                    if let Ok(mut set) = remuxing_ref.lock() {
+                        set.remove(&stem_clone);
+                    }
+                })
+                .await;
 
-                    triggered += 1;
+                if let Err(e) = result {
+                    worker_state.log(&format!("Batch remux worker panicked on '{stem}': {e}"));
+                    if let Ok(mut set) = worker_state.remuxing.lock() {
+                        set.remove(&stem);
+                    }
                 }
             }
-        }
+            worker_state.log(&format!("Batch remux queue drained ({total} episode(s))"));
+        });
     }
 
     Ok(Json(serde_json::json!({ "triggered": triggered })))

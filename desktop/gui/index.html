@@ -463,6 +463,9 @@
                 tab.classList.add('active');
                 document.getElementById('page-' + tab.dataset.page).classList.add('active');
                 if (tab.dataset.page === 'library') loadLibrary();
+                // Always re-sync logs from the server buffer when the user opens the tab,
+                // so anything emitted before `listen` attached isn't lost.
+                if (tab.dataset.page === 'logs') loadLogs();
             });
         });
 

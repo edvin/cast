@@ -310,7 +310,7 @@ async fn list_series(State(state): State<Arc<AppState>>) -> Json<Vec<SeriesListI
         })
         .collect();
 
-    result.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    result.sort_by_key(|a| a.title.to_lowercase());
     Json(result)
 }
 

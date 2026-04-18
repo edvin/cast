@@ -689,14 +689,7 @@ async fn stream_episode(
         }
         // Note: we should unregister when streaming ends, but since the stream is consumed
         // by the client, the active_streams entry is cleaned up by the cleanup task.
-        return stream_remuxed(
-            file_path,
-            headers,
-            file_size,
-            state.remuxing.clone(),
-            state.active_streams.clone(),
-        )
-        .await;
+        return stream_remuxed(file_path, headers, file_size, state.clone()).await;
     }
 
     let content_type = mime_guess::from_path(&file_path).first_or_octet_stream().to_string();
@@ -710,8 +703,7 @@ async fn stream_remuxed(
     file_path: std::path::PathBuf,
     headers: HeaderMap,
     _file_size: u64,
-    remuxing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-    active_streams: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    state: Arc<AppState>,
 ) -> ApiResult<Response> {
     let parent = file_path.parent().unwrap();
     let stem = file_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
@@ -736,7 +728,7 @@ async fn stream_remuxed(
     }
 
     // Mark as remuxing so background/on-demand paths don't start a duplicate
-    if let Ok(mut set) = remuxing.lock() {
+    if let Ok(mut set) = state.remuxing.lock() {
         if set.contains(&stem) {
             // Another path is already remuxing — wait for the .tmp file to appear,
             // then let the client retry when it's ready
@@ -748,11 +740,10 @@ async fn stream_remuxed(
     // Not cached — stream directly from ffmpeg as fragmented MP4 (instant start)
     // and tee the output to a cache file for future plays
     let (video_codec, video_extra) = detect_video_codec(&file_path);
-    tracing::info!(
-        "Streaming+caching {:?} (video: {})",
-        file_path.file_name().unwrap(),
-        video_codec
-    );
+    state.log(&format!(
+        "Streaming+caching: {} (video: {video_codec})",
+        file_path.file_name().unwrap().to_string_lossy()
+    ));
 
     let mut cmd = crate::media::ffmpeg_command();
     cmd.arg("-hide_banner")
@@ -794,18 +785,21 @@ async fn stream_remuxed(
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| {
-            tracing::error!("Failed to spawn ffmpeg: {e}");
+            state.log(&format!("Failed to spawn ffmpeg: {e}"));
             ApiError::internal("ffmpeg not available — install ffmpeg to play MKV files")
         })?;
 
-    // Log stderr in background
+    // Log stderr in background — forward to the UI log so the user can see ffmpeg warnings
     if let Some(stderr) = child.stderr.take() {
+        let err_state = state.clone();
         std::thread::spawn(move || {
             use std::io::Read;
             let mut buf = String::new();
             std::io::BufReader::new(stderr).read_to_string(&mut buf).ok();
             if !buf.is_empty() {
-                tracing::warn!("ffmpeg: {buf}");
+                for line in buf.lines().filter(|l| !l.trim().is_empty()).take(20) {
+                    err_state.log(&format!("ffmpeg: {line}"));
+                }
             }
         });
     }
@@ -822,8 +816,9 @@ async fn stream_remuxed(
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(32);
 
-    let remuxing_cleanup = remuxing;
-    let active_streams_cleanup = active_streams.clone();
+    let remuxing_cleanup = state.remuxing.clone();
+    let active_streams_cleanup = state.active_streams.clone();
+    let log_state = state.clone();
     let stem_cleanup = stem;
     std::thread::spawn(move || {
         // Drop guard ensures `remuxing` and `active_streams` sets are cleaned up even on panic
@@ -895,20 +890,26 @@ async fn stream_remuxed(
         drop(cache);
 
         if !ffmpeg_ok {
-            tracing::warn!(
-                "ffmpeg remux failed for {:?}; discarding cache",
-                file_path.file_name().unwrap_or_default()
-            );
+            log_state.log(&format!(
+                "ffmpeg remux failed for {}; discarding cache",
+                file_path.file_name().unwrap_or_default().to_string_lossy()
+            ));
             let _ = std::fs::remove_file(&tmp_path);
             return;
         }
 
         if std::fs::rename(&tmp_path, &final_path).is_ok() {
-            tracing::info!("Remux cached: {:?}", final_path.file_name().unwrap());
+            log_state.log(&format!(
+                "Remux cached: {}",
+                final_path.file_name().unwrap().to_string_lossy()
+            ));
             // Delete original only after confirming the MP4 is readable and non-empty
             let mp4_ok = final_path.metadata().map(|m| m.len() > 0).unwrap_or(false);
             if mp4_ok && file_path.exists() && std::fs::remove_file(&file_path).is_ok() {
-                tracing::info!("Deleted original: {:?}", file_path.file_name().unwrap());
+                log_state.log(&format!(
+                    "Deleted original: {}",
+                    file_path.file_name().unwrap().to_string_lossy()
+                ));
             }
         } else {
             let _ = std::fs::remove_file(&tmp_path);
@@ -1154,7 +1155,7 @@ struct FetchMetadataResponse {
 /// Trigger TMDB metadata/art fetch for all series
 async fn fetch_metadata(State(state): State<Arc<AppState>>) -> ApiResult<Json<FetchMetadataResponse>> {
     let client = state.tmdb.as_ref().ok_or_else(|| {
-        tracing::warn!("TMDB fetch requested but no API key configured");
+        state.log("TMDB fetch requested but no API key configured");
         ApiError::unavailable("TMDB API key not configured")
     })?;
 
@@ -1184,7 +1185,7 @@ async fn fetch_metadata(State(state): State<Arc<AppState>>) -> ApiResult<Json<Fe
     // Rescan library to pick up new art files
     match crate::library::Library::scan(&state.media_path) {
         Ok(lib) => *state.library.write().await = lib,
-        Err(e) => tracing::warn!("Rescan after metadata fetch failed: {e}"),
+        Err(e) => state.log(&format!("Rescan after metadata fetch failed: {e}")),
     }
 
     Ok(Json(FetchMetadataResponse {
@@ -1330,12 +1331,13 @@ async fn prepare_episode(
     drop(lib);
 
     let remuxing_ref = state.remuxing.clone();
+    let log_state = state.clone();
     tokio::task::spawn_blocking(move || {
         let (video_codec, video_extra) = detect_video_codec(&file_path_clone);
-        tracing::info!(
-            "On-demand remux: {:?} (video: {video_codec})",
-            file_path_clone.file_name().unwrap()
-        );
+        log_state.log(&format!(
+            "On-demand remux: {} (video: {video_codec})",
+            file_path_clone.file_name().unwrap().to_string_lossy()
+        ));
 
         let mut cmd = crate::media::ffmpeg_command();
         cmd.arg("-hide_banner")
@@ -1376,18 +1378,24 @@ async fn prepare_episode(
         match output {
             Ok(result) if result.status.success() => {
                 if std::fs::rename(&tmp_clone, &mp4_clone).is_ok() {
-                    tracing::info!("On-demand remux complete: {:?}", mp4_clone.file_name().unwrap());
+                    log_state.log(&format!(
+                        "On-demand remux complete: {}",
+                        mp4_clone.file_name().unwrap().to_string_lossy()
+                    ));
                     // Delete original
                     let _ = std::fs::remove_file(&file_path_clone);
                 }
             }
             Ok(result) => {
                 let stderr = String::from_utf8_lossy(&result.stderr);
-                tracing::warn!("On-demand remux failed: {stderr}");
+                log_state.log(&format!(
+                    "On-demand remux failed: {}",
+                    stderr.lines().next().unwrap_or("unknown")
+                ));
                 let _ = std::fs::remove_file(&tmp_clone);
             }
             Err(e) => {
-                tracing::warn!("ffmpeg not available: {e}");
+                log_state.log(&format!("ffmpeg not available: {e}"));
             }
         }
 
@@ -1437,13 +1445,14 @@ async fn remux_series(
                     let mp4_clone = mp4_path.clone();
                     let remuxing_ref = state.remuxing.clone();
                     let stem_clone = stem.clone();
+                    let log_state = state.clone();
 
                     tokio::task::spawn_blocking(move || {
                         let (video_codec, video_extra) = detect_video_codec(&ep_path_clone);
-                        tracing::info!(
-                            "Batch remux: {:?} (video: {video_codec})",
-                            ep_path_clone.file_name().unwrap()
-                        );
+                        log_state.log(&format!(
+                            "Batch remux: {} (video: {video_codec})",
+                            ep_path_clone.file_name().unwrap().to_string_lossy()
+                        ));
                         let mut cmd = crate::media::ffmpeg_command();
                         cmd.arg("-hide_banner")
                             .arg("-loglevel")
@@ -1482,11 +1491,23 @@ async fn remux_series(
                         match output {
                             Ok(result) if result.status.success() => {
                                 if std::fs::rename(&tmp_clone, &mp4_clone).is_ok() {
-                                    tracing::info!("Batch remux complete: {:?}", mp4_clone.file_name().unwrap());
+                                    log_state.log(&format!(
+                                        "Batch remux complete: {}",
+                                        mp4_clone.file_name().unwrap().to_string_lossy()
+                                    ));
                                     let _ = std::fs::remove_file(&ep_path_clone);
                                 }
                             }
-                            _ => {
+                            Ok(result) => {
+                                let stderr = String::from_utf8_lossy(&result.stderr);
+                                log_state.log(&format!(
+                                    "Batch remux failed: {}",
+                                    stderr.lines().next().unwrap_or("unknown error")
+                                ));
+                                let _ = std::fs::remove_file(&tmp_clone);
+                            }
+                            Err(e) => {
+                                log_state.log(&format!("ffmpeg not available: {e}"));
                                 let _ = std::fs::remove_file(&tmp_clone);
                             }
                         }

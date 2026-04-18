@@ -1,18 +1,26 @@
 const SERVICE_TYPE: &str = "_cast-media._tcp";
 
-pub async fn advertise(name: &str, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn advertise(
+    name: &str,
+    port: u16,
+    log: impl Fn(&str) + Send + Sync,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Use the system's dns-sd command on macOS for reliable Bonjour registration.
     // On other platforms, fall back to the mdns-sd Rust library.
     if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
-        advertise_native(name, port).await
+        advertise_native(name, port, log).await
     } else {
-        advertise_mdns_sd(name, port).await
+        advertise_mdns_sd(name, port, log).await
     }
 }
 
 /// Register via the system dns-sd command (macOS) or avahi-publish (Linux).
 /// This is more reliable than the Rust mdns-sd library as it uses the OS mDNS responder.
-async fn advertise_native(name: &str, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+async fn advertise_native(
+    name: &str,
+    port: u16,
+    log: impl Fn(&str) + Send + Sync,
+) -> Result<(), Box<dyn std::error::Error>> {
     let (cmd, args) = if cfg!(target_os = "macos") {
         (
             "dns-sd",
@@ -39,11 +47,15 @@ async fn advertise_native(name: &str, port: u16) -> Result<(), Box<dyn std::erro
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| {
-            tracing::warn!("Could not start {cmd} for Bonjour: {e}");
+            let msg = format!("Could not start {cmd} for Bonjour: {e}");
+            tracing::warn!("{msg}");
+            log(&msg);
             e
         })?;
 
-    tracing::info!("mDNS: advertising as '{name}' on port {port} (via {cmd})");
+    let msg = format!("mDNS: advertising as '{name}' on port {port} (via {cmd})");
+    tracing::info!("{msg}");
+    log(&msg);
 
     // Keep running — the child process handles mDNS responses
     let _ = child.wait().await;
@@ -51,7 +63,11 @@ async fn advertise_native(name: &str, port: u16) -> Result<(), Box<dyn std::erro
 }
 
 /// Fallback: use the mdns-sd Rust library (Windows, or if native command unavailable)
-async fn advertise_mdns_sd(name: &str, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+async fn advertise_mdns_sd(
+    name: &str,
+    port: u16,
+    log: impl Fn(&str) + Send + Sync,
+) -> Result<(), Box<dyn std::error::Error>> {
     use mdns_sd::{ServiceDaemon, ServiceInfo};
 
     let mdns = ServiceDaemon::new()?;
@@ -68,7 +84,9 @@ async fn advertise_mdns_sd(name: &str, port: u16) -> Result<(), Box<dyn std::err
     )?;
 
     mdns.register(service)?;
-    tracing::info!("mDNS: advertising as '{name}' on port {port} (via mdns-sd library)");
+    let msg = format!("mDNS: advertising as '{name}' on port {port} (via mdns-sd library)");
+    tracing::info!("{msg}");
+    log(&msg);
 
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(3600)).await;

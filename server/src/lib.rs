@@ -168,9 +168,11 @@ pub async fn start_server(
     // mDNS advertisement
     let mdns_name = config.name.clone();
     let mdns_port = config.port;
+    let mdns_state = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = mdns::advertise(&mdns_name, mdns_port).await {
-            tracing::warn!("mDNS advertisement failed: {e}");
+        let log_state = mdns_state.clone();
+        if let Err(e) = mdns::advertise(&mdns_name, mdns_port, move |msg| log_state.log(msg)).await {
+            mdns_state.log(&format!("mDNS advertisement failed: {e}"));
         }
     });
 
@@ -252,7 +254,7 @@ pub async fn start_server(
 
                     *rescan_state.library.write().await = lib;
                 }
-                Err(e) => tracing::warn!("Rescan failed: {e}"),
+                Err(e) => rescan_state.log(&format!("Rescan failed: {e}")),
             }
         }
     });

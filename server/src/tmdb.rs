@@ -513,7 +513,9 @@ pub async fn fetch_all_metadata(
 
         // Resolve series info: use override ID, cleaned name search, or raw name fallback
         let search_result = if let Some(tmdb_id) = tmdb_id_override {
-            tracing::info!("Using TMDB ID override {tmdb_id} for '{title}'");
+            let msg = format!("Using TMDB ID override {tmdb_id} for '{title}'");
+            tracing::info!("{msg}");
+            log(&msg);
             client.get_series_detail(tmdb_id).await
         } else {
             let cleaned = clean_search_query(&title);
@@ -550,7 +552,9 @@ pub async fn fetch_all_metadata(
                     rating: info.rating,
                 };
                 if let Err(e) = db.save_series_metadata(&meta) {
-                    tracing::warn!("Failed to save metadata for '{title}': {e}");
+                    let msg = format!("Failed to save metadata for '{title}': {e}");
+                    tracing::warn!("{msg}");
+                    log(&msg);
                 }
 
                 // Download poster if missing
@@ -558,7 +562,9 @@ pub async fn fetch_all_metadata(
                     if let Some(ref poster_url) = info.poster_url {
                         let series_dir = media_root.join(&title);
                         if let Err(e) = client.download_poster(&series_dir, poster_url).await {
-                            tracing::warn!("Failed to download poster for '{title}': {e}");
+                            let msg = format!("Failed to download poster for '{title}': {e}");
+                            tracing::warn!("{msg}");
+                            log(&msg);
                         } else {
                             downloaded += 1;
                         }
@@ -571,7 +577,9 @@ pub async fn fetch_all_metadata(
                     let legacy_path = media_root.join(&title).join("backdrop.jpg");
                     if !backdrop_path.exists() && !legacy_path.exists() {
                         if let Err(e) = client.download_backdrop(&media_root.join(&title), backdrop_url).await {
-                            tracing::warn!("Failed to download backdrop for '{title}': {e}");
+                            let msg = format!("Failed to download backdrop for '{title}': {e}");
+                            tracing::warn!("{msg}");
+                            log(&msg);
                         }
                     }
                 }
@@ -594,12 +602,16 @@ pub async fn fetch_all_metadata(
                                     still_url: ep.still_url,
                                 };
                                 if let Err(e) = db.save_episode_metadata(&ep_meta) {
-                                    tracing::warn!("Failed to save episode metadata: {e}");
+                                    let msg = format!("Failed to save episode metadata: {e}");
+                                    tracing::warn!("{msg}");
+                                    log(&msg);
                                 }
                             }
                         }
                         Err(e) => {
-                            tracing::warn!("Failed to fetch season {season_num} for '{title}': {e}");
+                            let msg = format!("Failed to fetch season {season_num} for '{title}': {e}");
+                            tracing::warn!("{msg}");
+                            log(&msg);
                         }
                     }
                 }

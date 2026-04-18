@@ -18,7 +18,10 @@ struct LogEntry {
 
 impl LogBuffer {
     fn new(max: usize) -> Self {
-        Self { entries: Vec::new(), max_entries: max }
+        Self {
+            entries: Vec::new(),
+            max_entries: max,
+        }
     }
 
     fn push(&mut self, message: String) {
@@ -35,6 +38,9 @@ struct DesktopState {
     logs: Arc<Mutex<LogBuffer>>,
     server_running: Arc<Mutex<bool>>,
     config: Arc<Mutex<AppConfig>>,
+    /// Keeps the system tray icon alive for the lifetime of the app.
+    /// The tray is removed when its handle drops, so we stash it here.
+    _tray: Arc<Mutex<Option<tauri::tray::TrayIcon>>>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -69,9 +75,24 @@ fn load_config() -> AppConfig {
     AppConfig {
         media_path: std::env::var("CAST_MEDIA_PATH").unwrap_or_default(),
         tmdb_key: std::env::var("TMDB_API_KEY").unwrap_or_default(),
-        server_name: std::env::var("CAST_SERVER_NAME").unwrap_or_else(|_| "Cast Server".to_string()),
-        port: std::env::var("CAST_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(3456),
+        server_name: std::env::var("CAST_SERVER_NAME")
+            .unwrap_or_else(|_| "Cast Server".to_string()),
+        port: std::env::var("CAST_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(3456),
     }
+}
+
+/// Quote a .env value: wrap in double quotes and escape `\`, `"` and `$` so that
+/// paths containing spaces, backslashes (Windows) or shell metacharacters round-trip
+/// through `dotenvy` without being split or interpolated.
+fn env_quote(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$");
+    format!("\"{escaped}\"")
 }
 
 /// Save config to .env file
@@ -83,13 +104,14 @@ fn save_config_to_env(config: &AppConfig) -> Result<(), String> {
         .to_path_buf();
 
     let env_path = exe_dir.join(".env");
-    let mut content = format!("CAST_MEDIA_PATH={}\n", config.media_path);
+    let mut content = format!("CAST_MEDIA_PATH={}\n", env_quote(&config.media_path));
     if !config.tmdb_key.is_empty() {
-        content += &format!("TMDB_API_KEY={}\n", config.tmdb_key);
+        content += &format!("TMDB_API_KEY={}\n", env_quote(&config.tmdb_key));
     }
     if config.server_name != "Cast Server" {
-        content += &format!("CAST_SERVER_NAME={}\n", config.server_name);
+        content += &format!("CAST_SERVER_NAME={}\n", env_quote(&config.server_name));
     }
+    content += &format!("CAST_PORT={}\n", config.port);
     std::fs::write(&env_path, content).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -108,6 +130,25 @@ fn get_config(state: tauri::State<'_, DesktopState>) -> AppConfig {
 
 #[tauri::command]
 fn save_config(state: tauri::State<'_, DesktopState>, config: AppConfig) -> Result<(), String> {
+    if config.media_path.trim().is_empty() {
+        return Err("Media path is required".to_string());
+    }
+    let media = std::path::Path::new(&config.media_path);
+    if !media.exists() {
+        return Err(format!(
+            "Media folder does not exist: {}",
+            config.media_path
+        ));
+    }
+    if !media.is_dir() {
+        return Err(format!(
+            "Media path is not a directory: {}",
+            config.media_path
+        ));
+    }
+    if config.port == 0 {
+        return Err("Port must be between 1 and 65535".to_string());
+    }
     save_config_to_env(&config)?;
     *state.config.lock().unwrap() = config;
     Ok(())
@@ -126,14 +167,20 @@ async fn restart_server(
     let logs = state.logs.clone();
     let server_running = state.server_running.clone();
 
-    logs.lock().unwrap().push("Starting Cast server...".to_string());
+    logs.lock()
+        .unwrap()
+        .push("Starting Cast server...".to_string());
     let _ = app_handle.emit("server-log", "Starting Cast server...");
 
     let server_config = cast_server::ServerConfig {
         media_path: PathBuf::from(&config.media_path),
         port: config.port,
         name: config.server_name.clone(),
-        tmdb_key: if config.tmdb_key.is_empty() { None } else { Some(config.tmdb_key.clone()) },
+        tmdb_key: if config.tmdb_key.is_empty() {
+            None
+        } else {
+            Some(config.tmdb_key.clone())
+        },
     };
 
     let log_cb = {
@@ -188,7 +235,10 @@ struct IngestResult {
 }
 
 #[tauri::command]
-fn ingest_file(state: tauri::State<'_, DesktopState>, file_path: String) -> Result<IngestResult, String> {
+fn ingest_file(
+    state: tauri::State<'_, DesktopState>,
+    file_path: String,
+) -> Result<IngestResult, String> {
     let config = state.config.lock().unwrap().clone();
     if config.media_path.is_empty() {
         return Err("Media path not configured".to_string());
@@ -199,7 +249,8 @@ fn ingest_file(state: tauri::State<'_, DesktopState>, file_path: String) -> Resu
         return Err(format!("File not found: {file_path}"));
     }
 
-    let filename = source.file_name()
+    let filename = source
+        .file_name()
         .and_then(|n| n.to_str())
         .ok_or("Invalid filename")?
         .to_string();
@@ -245,14 +296,7 @@ fn extract_series_name(filename: &str) -> String {
     // Replace dots and underscores with spaces
     let cleaned = stem.replace(['.', '_'], " ");
 
-    // Find S01E03 or s01e03 pattern and take everything before it
-    if let Some(idx) = cleaned.to_lowercase().find(|c: char| {
-        false // placeholder
-    }) {
-        // won't match, use regex below
-    }
-
-    // Use regex-like manual search for SxxExx
+    // Manual search for SxxExx (we avoid pulling in a regex crate here)
     let lower = cleaned.to_lowercase();
     for (i, _) in lower.char_indices() {
         if i + 6 <= lower.len() {
@@ -289,8 +333,10 @@ fn extract_series_name(filename: &str) -> String {
 
     // Fallback: strip common tags and use the whole thing
     let mut name = cleaned;
-    for tag in ["720p", "1080p", "2160p", "4k", "web", "webrip", "hdtv",
-                "bluray", "h264", "h265", "x264", "x265", "hevc", "aac"] {
+    for tag in [
+        "720p", "1080p", "2160p", "4k", "web", "webrip", "hdtv", "bluray", "h264", "h265", "x264",
+        "x265", "hevc", "aac",
+    ] {
         if let Some(pos) = name.to_lowercase().find(tag) {
             name = name[..pos].to_string();
         }
@@ -299,19 +345,26 @@ fn extract_series_name(filename: &str) -> String {
 }
 
 #[tauri::command]
-fn ingest_files(state: tauri::State<'_, DesktopState>, file_paths: Vec<String>) -> Vec<IngestResult> {
-    file_paths.iter().map(|path| {
-        match ingest_file(state.clone(), path.clone()) {
+fn ingest_files(
+    state: tauri::State<'_, DesktopState>,
+    file_paths: Vec<String>,
+) -> Vec<IngestResult> {
+    file_paths
+        .iter()
+        .map(|path| match ingest_file(state.clone(), path.clone()) {
             Ok(r) => r,
             Err(e) => IngestResult {
                 success: false,
                 series_name: String::new(),
-                filename: std::path::Path::new(path).file_name()
-                    .and_then(|n| n.to_str()).unwrap_or(path).to_string(),
+                filename: std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(path)
+                    .to_string(),
                 message: e,
-            }
-        }
-    }).collect()
+            },
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -331,7 +384,10 @@ struct ToolStatus {
 #[tauri::command]
 fn get_autostart(app_handle: tauri::AppHandle) -> Result<bool, String> {
     use tauri_plugin_autostart::ManagerExt;
-    app_handle.autolaunch().is_enabled().map_err(|e| e.to_string())
+    app_handle
+        .autolaunch()
+        .is_enabled()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -377,11 +433,13 @@ pub fn run() {
     let config = load_config();
     let logs = Arc::new(Mutex::new(LogBuffer::new(500)));
     let server_running = Arc::new(Mutex::new(false));
+    let tray_slot: Arc<Mutex<Option<tauri::tray::TrayIcon>>> = Arc::new(Mutex::new(None));
 
     let desktop_state = DesktopState {
         logs: logs.clone(),
         server_running: server_running.clone(),
         config: Arc::new(Mutex::new(config.clone())),
+        _tray: tray_slot.clone(),
     };
 
     tracing_subscriber::fmt()
@@ -419,11 +477,14 @@ pub fn run() {
                 }
                 tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) => {
                     let video_exts = ["mp4", "mkv", "avi", "webm", "mov", "m4v"];
-                    let video_paths: Vec<String> = paths.iter()
-                        .filter(|p| p.extension()
-                            .and_then(|e| e.to_str())
-                            .map(|e| video_exts.contains(&e.to_lowercase().as_str()))
-                            .unwrap_or(false))
+                    let video_paths: Vec<String> = paths
+                        .iter()
+                        .filter(|p| {
+                            p.extension()
+                                .and_then(|e| e.to_str())
+                                .map(|e| video_exts.contains(&e.to_lowercase().as_str()))
+                                .unwrap_or(false)
+                        })
                         .map(|p| p.to_string_lossy().to_string())
                         .collect();
                     if !video_paths.is_empty() {
@@ -435,7 +496,10 @@ pub fn run() {
         })
         .setup(move |app| {
             match tray::setup_tray(app.handle()) {
-                Ok(_) => eprintln!("[Cast] Tray icon created successfully"),
+                Ok(icon) => {
+                    *tray_slot.lock().unwrap() = Some(icon);
+                    eprintln!("[Cast] Tray icon created successfully");
+                }
                 Err(e) => eprintln!("[Cast] ERROR creating tray icon: {e}"),
             }
 
@@ -449,7 +513,11 @@ pub fn run() {
                     media_path: PathBuf::from(&config.media_path),
                     port: config.port,
                     name: config.server_name.clone(),
-                    tmdb_key: if config.tmdb_key.is_empty() { None } else { Some(config.tmdb_key.clone()) },
+                    tmdb_key: if config.tmdb_key.is_empty() {
+                        None
+                    } else {
+                        Some(config.tmdb_key.clone())
+                    },
                 };
 
                 tauri::async_runtime::spawn(async move {
@@ -463,7 +531,9 @@ pub fn run() {
                         }) as Box<dyn Fn(&str) + Send + Sync>
                     };
 
-                    logs.lock().unwrap().push("Starting Cast server...".to_string());
+                    logs.lock()
+                        .unwrap()
+                        .push("Starting Cast server...".to_string());
 
                     match cast_server::start_server(server_config, Some(log_cb)).await {
                         Ok(_handle) => {

@@ -524,11 +524,21 @@
 
         document.getElementById('saveBtn').addEventListener('click', async () => {
             const btn = document.getElementById('saveBtn');
+            const mediaPath = document.getElementById('cfgMediaPath').value.trim();
+            const portValue = parseInt(document.getElementById('cfgPort').value, 10);
+            if (!mediaPath) {
+                showToast('Media folder is required', 'Point Cast at the folder that contains your series subfolders.', 'error');
+                return;
+            }
+            if (!Number.isFinite(portValue) || portValue < 1 || portValue > 65535) {
+                showToast('Invalid port', 'Port must be between 1 and 65535.', 'error');
+                return;
+            }
             const config = {
-                media_path: document.getElementById('cfgMediaPath').value,
-                tmdb_key: document.getElementById('cfgTmdbKey').value,
-                server_name: document.getElementById('cfgServerName').value || 'Cast Server',
-                port: parseInt(document.getElementById('cfgPort').value) || 3456,
+                media_path: mediaPath,
+                tmdb_key: document.getElementById('cfgTmdbKey').value.trim(),
+                server_name: document.getElementById('cfgServerName').value.trim() || 'Cast Server',
+                port: portValue,
             };
             try {
                 btn.disabled = true;
@@ -545,7 +555,9 @@
                 document.querySelector('[data-page="logs"]').classList.add('active');
                 document.getElementById('page-logs').classList.add('active');
                 loadStats();
-            } catch (e) { alert('Error: ' + e); }
+            } catch (e) {
+                showToast('Could not start server', String(e), 'error');
+            }
             finally { btn.disabled = false; btn.textContent = 'Save & Start Server'; }
         });
 
@@ -817,18 +829,50 @@
         async function prepareEp(episodeId, btn) {
             btn.disabled = true;
             btn.textContent = 'Remuxing...';
+            // Bound the polling: ~40 minutes max (800 * 3s), stop after 5 consecutive errors
+            const maxAttempts = 800;
+            const maxErrors = 5;
+            let attempt = 0;
+            let errors = 0;
             try {
-                await fetch(apiUrl(`/api/episodes/${episodeId}/prepare`), { method: 'POST' });
-                // Poll for completion
+                const initial = await fetch(apiUrl(`/api/episodes/${episodeId}/prepare`), { method: 'POST' });
+                const initialStatus = await initial.json();
+                if (initialStatus.ready) {
+                    btn.textContent = '✓ Done';
+                    btn.style.color = '#34c759';
+                    btn.disabled = false;
+                    return;
+                }
                 const poll = setInterval(async () => {
-                    const resp = await fetch(apiUrl(`/api/episodes/${episodeId}/prepare`), { method: 'POST' });
-                    const status = await resp.json();
-                    if (status.ready) {
+                    attempt++;
+                    if (attempt > maxAttempts) {
                         clearInterval(poll);
-                        btn.textContent = '✓ Done';
-                        btn.style.color = '#34c759';
-                    } else if (status.progress_percent !== null) {
-                        btn.textContent = `${status.progress_percent}%`;
+                        btn.textContent = 'Timed out';
+                        btn.disabled = false;
+                        showToast('Remux timed out', 'The server did not finish preparing this file in time.', 'error');
+                        return;
+                    }
+                    try {
+                        const resp = await fetch(apiUrl(`/api/episodes/${episodeId}/prepare`), { method: 'POST' });
+                        if (!resp.ok) throw new Error(`status ${resp.status}`);
+                        const status = await resp.json();
+                        errors = 0;
+                        if (status.ready) {
+                            clearInterval(poll);
+                            btn.textContent = '✓ Done';
+                            btn.style.color = '#34c759';
+                            btn.disabled = false;
+                        } else if (status.progress_percent !== null && status.progress_percent !== undefined) {
+                            btn.textContent = `${status.progress_percent}%`;
+                        }
+                    } catch (err) {
+                        errors++;
+                        if (errors >= maxErrors) {
+                            clearInterval(poll);
+                            btn.textContent = 'Failed';
+                            btn.disabled = false;
+                            showToast('Lost connection', 'Polling for remux progress failed repeatedly.', 'error');
+                        }
                     }
                 }, 3000);
             } catch (e) {

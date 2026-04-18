@@ -10,16 +10,15 @@ final class ServerConnection {
     private var healthCheckTask: Task<Void, Never>?
 
     func connect(host: String, port: UInt16) {
-        baseURL = URL(string: "http://\(host):\(port)")
+        let hostPart = host.contains(":") ? "[\(host)]" : host
+        baseURL = URL(string: "http://\(hostPart):\(port)")
         connectionLost = false
-        UserDefaults.standard.set("\(host):\(port)", forKey: Self.lastServerKey)
+        UserDefaults.standard.set("\(host)|\(port)", forKey: Self.lastServerKey)
         startHealthCheck()
     }
 
     func connect(address: String) {
-        let parts = address.split(separator: ":")
-        let host = String(parts[0])
-        let port: UInt16 = parts.count > 1 ? UInt16(parts[1]) ?? 3456 : 3456
+        guard let (host, port) = Self.parseStoredAddress(address) else { return }
         connect(host: host, port: port)
     }
 
@@ -30,15 +29,33 @@ final class ServerConnection {
         connectionLost = false
     }
 
+    /// Parses a stored address. Supports both the new "host|port" format (IPv6-safe)
+    /// and the legacy "host:port" format.
+    private static func parseStoredAddress(_ address: String) -> (String, UInt16)? {
+        if let sep = address.firstIndex(of: "|") {
+            let host = String(address[..<sep])
+            let portStr = address[address.index(after: sep)...]
+            guard let p = UInt16(portStr) else { return nil }
+            return (host, p)
+        }
+        // Legacy IPv4/hostname:port format
+        guard let colon = address.lastIndex(of: ":"), address.filter({ $0 == ":" }).count == 1 else {
+            return (address, 3456)
+        }
+        let host = String(address[..<colon])
+        let portStr = address[address.index(after: colon)...]
+        guard let p = UInt16(portStr) else { return nil }
+        return (host, p)
+    }
+
     func tryReconnectToLastServer() async -> Bool {
-        guard let address = UserDefaults.standard.string(forKey: Self.lastServerKey) else {
+        guard let address = UserDefaults.standard.string(forKey: Self.lastServerKey),
+              let (host, port) = Self.parseStoredAddress(address) else {
             return false
         }
-        let parts = address.split(separator: ":")
-        let host = String(parts[0])
-        let port: UInt16 = parts.count > 1 ? UInt16(parts[1]) ?? 3456 : 3456
 
-        guard let url = URL(string: "http://\(host):\(port)/api/series") else {
+        let hostPart = host.contains(":") ? "[\(host)]" : host
+        guard let url = URL(string: "http://\(hostPart):\(port)/api/series") else {
             return false
         }
 

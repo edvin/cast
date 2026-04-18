@@ -317,8 +317,11 @@ final class ExternalSubtitleViewController: UIViewController {
         if let lang = language {
             Task {
                 if let group = try? await item.asset.loadMediaSelectionGroup(for: .legible) {
+                    // Match "en", "en-US", "eng" etc. against the requested 2-letter code
+                    let normalized = lang.lowercased()
                     let options = group.options.filter { option in
-                        option.locale?.language.languageCode?.identifier == lang
+                        guard let id = option.locale?.language.languageCode?.identifier.lowercased() else { return false }
+                        return id == normalized || id.hasPrefix(normalized) || normalized.hasPrefix(id)
                     }
                     if let option = options.first {
                         await MainActor.run {

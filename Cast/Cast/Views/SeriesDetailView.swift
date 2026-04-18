@@ -94,6 +94,12 @@ struct SeriesDetailView: View {
                         Text("Converting for Apple TV playback")
                             .font(.caption)
                             .foregroundStyle(Color(white: 0.5))
+
+                        Button("Cancel") {
+                            preparingEpisode = nil
+                            prepareProgress = nil
+                        }
+                        .padding(.top, 12)
                     }
                 }
             }
@@ -282,34 +288,60 @@ struct SeriesDetailView: View {
     private func playEpisode(_ episode: EpisodeItem) async {
         guard let client else { return }
 
-        // Check if episode needs preparation
+        // Cap total wait at ~20 minutes (600 * 2s); well beyond any realistic remux time
+        // but bounded so a server that stops responding mid-prepare can't strand the UI.
+        let maxAttempts = 600
+        var consecutiveFailures = 0
+        let maxConsecutiveFailures = 5
+
         do {
             let status = try await client.prepareEpisode(episodeId: episode.id)
             if status.ready {
-                // Ready to play immediately
                 playerEpisode = PlayerInfo(episode: episode, resumePosition: episode.progress?.positionSecs ?? 0)
                 return
             }
 
-            // Show preparing overlay and poll for progress
             preparingEpisode = episode
             prepareProgress = status.progressPercent
 
-            while true {
+            for _ in 0..<maxAttempts {
                 try await Task.sleep(for: .seconds(2))
-                let status = try await client.prepareEpisode(episodeId: episode.id)
-                prepareProgress = status.progressPercent
-                if status.ready {
+                // User cancelled or view went away
+                if Task.isCancelled || preparingEpisode == nil { return }
+                do {
+                    let status = try await client.prepareEpisode(episodeId: episode.id)
+                    consecutiveFailures = 0
+                    prepareProgress = status.progressPercent
+                    if status.ready {
+                        preparingEpisode = nil
+                        prepareProgress = nil
+                        await loadData()
+                        playerEpisode = PlayerInfo(episode: episode, resumePosition: episode.progress?.positionSecs ?? 0)
+                        return
+                    }
+                } catch is CancellationError {
                     preparingEpisode = nil
                     prepareProgress = nil
-                    // Reload data since the file changed
-                    await loadData()
-                    playerEpisode = PlayerInfo(episode: episode, resumePosition: episode.progress?.positionSecs ?? 0)
                     return
+                } catch {
+                    consecutiveFailures += 1
+                    if consecutiveFailures >= maxConsecutiveFailures {
+                        preparingEpisode = nil
+                        prepareProgress = nil
+                        self.error = (error as? CastError) ?? .networkError("Lost connection while preparing episode. Try again.")
+                        return
+                    }
                 }
             }
+            // Timed out
+            preparingEpisode = nil
+            prepareProgress = nil
+            self.error = .networkError("Preparation timed out. The server may be overloaded — try again shortly.")
+        } catch is CancellationError {
+            preparingEpisode = nil
+            prepareProgress = nil
         } catch {
-            // If prepare fails, try playing anyway
+            // If the initial prepare call fails, try playing anyway (may be a pre-existing MP4)
             preparingEpisode = nil
             prepareProgress = nil
             playerEpisode = PlayerInfo(episode: episode, resumePosition: episode.progress?.positionSecs ?? 0)

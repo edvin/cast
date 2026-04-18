@@ -14,20 +14,22 @@ pub async fn advertise(name: &str, port: u16) -> Result<(), Box<dyn std::error::
 /// This is more reliable than the Rust mdns-sd library as it uses the OS mDNS responder.
 async fn advertise_native(name: &str, port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let (cmd, args) = if cfg!(target_os = "macos") {
-        ("dns-sd", vec![
-            "-R".to_string(),
-            name.to_string(),
-            SERVICE_TYPE.to_string(),
-            "local".to_string(),
-            port.to_string(),
-        ])
+        (
+            "dns-sd",
+            vec![
+                "-R".to_string(),
+                name.to_string(),
+                SERVICE_TYPE.to_string(),
+                "local".to_string(),
+                port.to_string(),
+            ],
+        )
     } else {
         // Linux: avahi-publish
-        ("avahi-publish-service", vec![
-            name.to_string(),
-            format!("{SERVICE_TYPE}."),
-            port.to_string(),
-        ])
+        (
+            "avahi-publish-service",
+            vec![name.to_string(), format!("{SERVICE_TYPE}."), port.to_string()],
+        )
     };
 
     let mut child = tokio::process::Command::new(cmd)

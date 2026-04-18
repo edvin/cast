@@ -558,10 +558,14 @@ pub fn needs_remux(path: &std::path::Path) -> bool {
 /// Returns ("copy", ...) for compatible codecs, ("libx264", ...) for incompatible ones.
 pub fn detect_video_codec(path: &std::path::Path) -> (&'static str, &'static str) {
     let output = crate::media::ffprobe_command()
-        .arg("-v").arg("quiet")
-        .arg("-select_streams").arg("v:0")
-        .arg("-show_entries").arg("stream=codec_name,pix_fmt")
-        .arg("-of").arg("csv=p=0")
+        .arg("-v")
+        .arg("quiet")
+        .arg("-select_streams")
+        .arg("v:0")
+        .arg("-show_entries")
+        .arg("stream=codec_name,pix_fmt")
+        .arg("-of")
+        .arg("csv=p=0")
         .arg(path)
         .output();
 
@@ -602,9 +606,11 @@ async fn serve_file(
     match range {
         Some((start, end)) => {
             let length = end - start + 1;
-            let mut file = tokio::fs::File::open(&path).await
+            let mut file = tokio::fs::File::open(&path)
+                .await
                 .map_err(|_| ApiError::internal("Failed to read file"))?;
-            file.seek(std::io::SeekFrom::Start(start)).await
+            file.seek(std::io::SeekFrom::Start(start))
+                .await
                 .map_err(|_| ApiError::internal("Failed to seek"))?;
             let stream = ReaderStream::new(file.take(length));
             let body = axum::body::Body::from_stream(stream);
@@ -614,10 +620,12 @@ async fn serve_file(
                 .header(header::CONTENT_LENGTH, length.to_string())
                 .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{file_size}"))
                 .header(header::ACCEPT_RANGES, "bytes")
-                .body(body).unwrap())
+                .body(body)
+                .unwrap())
         }
         None => {
-            let file = tokio::fs::File::open(&path).await
+            let file = tokio::fs::File::open(&path)
+                .await
                 .map_err(|_| ApiError::internal("Failed to read file"))?;
             let stream = ReaderStream::new(file);
             let body = axum::body::Body::from_stream(stream);
@@ -626,7 +634,8 @@ async fn serve_file(
                 .header(header::CONTENT_TYPE, content_type)
                 .header(header::CONTENT_LENGTH, file_size.to_string())
                 .header(header::ACCEPT_RANGES, "bytes")
-                .body(body).unwrap())
+                .body(body)
+                .unwrap())
         }
     }
 }
@@ -650,11 +659,17 @@ async fn stream_episode(
         let parent = file_path.parent().unwrap();
         let mp4_sibling = parent.join(format!("{stem}.mp4"));
         let legacy_mp4 = parent.join(".remux").join(format!("{stem}.mp4"));
-        let cached = if mp4_sibling.exists() { Some(mp4_sibling) }
-            else if legacy_mp4.exists() { Some(legacy_mp4) }
-            else { None };
+        let cached = if mp4_sibling.exists() {
+            Some(mp4_sibling)
+        } else if legacy_mp4.exists() {
+            Some(legacy_mp4)
+        } else {
+            None
+        };
         if let Some(cached_path) = cached {
-            let file_size = cached_path.metadata().map(|m| m.len())
+            let file_size = cached_path
+                .metadata()
+                .map(|m| m.len())
                 .map_err(|_| ApiError::not_found("Video file not found"))?;
             return serve_file(cached_path, &headers, file_size, "video/mp4").await;
         }
@@ -674,7 +689,14 @@ async fn stream_episode(
         }
         // Note: we should unregister when streaming ends, but since the stream is consumed
         // by the client, the active_streams entry is cleaned up by the cleanup task.
-        return stream_remuxed(file_path, headers, file_size, state.remuxing.clone()).await;
+        return stream_remuxed(
+            file_path,
+            headers,
+            file_size,
+            state.remuxing.clone(),
+            state.active_streams.clone(),
+        )
+        .await;
     }
 
     let content_type = mime_guess::from_path(&file_path).first_or_octet_stream().to_string();
@@ -689,6 +711,7 @@ async fn stream_remuxed(
     headers: HeaderMap,
     _file_size: u64,
     remuxing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    active_streams: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 ) -> ApiResult<Response> {
     let parent = file_path.parent().unwrap();
     let stem = file_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
@@ -705,7 +728,9 @@ async fn stream_remuxed(
     };
 
     if let Some(cached_path) = cached {
-        let file_size = cached_path.metadata().map(|m| m.len())
+        let file_size = cached_path
+            .metadata()
+            .map(|m| m.len())
             .map_err(|_| ApiError::internal("Cached file not found"))?;
         return serve_file(cached_path, &headers, file_size, "video/mp4").await;
     }
@@ -723,13 +748,20 @@ async fn stream_remuxed(
     // Not cached — stream directly from ffmpeg as fragmented MP4 (instant start)
     // and tee the output to a cache file for future plays
     let (video_codec, video_extra) = detect_video_codec(&file_path);
-    tracing::info!("Streaming+caching {:?} (video: {})", file_path.file_name().unwrap(), video_codec);
+    tracing::info!(
+        "Streaming+caching {:?} (video: {})",
+        file_path.file_name().unwrap(),
+        video_codec
+    );
 
     let mut cmd = crate::media::ffmpeg_command();
     cmd.arg("-hide_banner")
-        .arg("-loglevel").arg("warning")
-        .arg("-i").arg(&file_path)
-        .arg("-c:v").arg(video_codec);
+        .arg("-loglevel")
+        .arg("warning")
+        .arg("-i")
+        .arg(&file_path)
+        .arg("-c:v")
+        .arg(video_codec);
 
     // Add quality/speed settings for transcoding
     if video_codec != "copy" {
@@ -739,15 +771,24 @@ async fn stream_remuxed(
     }
 
     let mut child = cmd
-        .arg("-c:a").arg("aac")
-        .arg("-b:a").arg("192k")
-        .arg("-ac").arg("2")
-        .arg("-map").arg("0:v:0")
-        .arg("-map").arg("0:a:0")
-        .arg("-map").arg("0:s?")
-        .arg("-c:s").arg("mov_text")
-        .arg("-movflags").arg("frag_keyframe+empty_moov+default_base_moof")
-        .arg("-f").arg("mp4")
+        .arg("-c:a")
+        .arg("aac")
+        .arg("-b:a")
+        .arg("192k")
+        .arg("-ac")
+        .arg("2")
+        .arg("-map")
+        .arg("0:v:0")
+        .arg("-map")
+        .arg("0:a:0")
+        .arg("-map")
+        .arg("0:s?")
+        .arg("-c:s")
+        .arg("mov_text")
+        .arg("-movflags")
+        .arg("frag_keyframe+empty_moov+default_base_moof")
+        .arg("-f")
+        .arg("mp4")
         .arg("pipe:1")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -769,7 +810,9 @@ async fn stream_remuxed(
         });
     }
 
-    let stdout = child.stdout.take()
+    let stdout = child
+        .stdout
+        .take()
         .ok_or_else(|| ApiError::internal("Failed to capture ffmpeg output"))?;
 
     // Tee: read from ffmpeg, send to HTTP response AND write to sibling .mp4
@@ -780,24 +823,48 @@ async fn stream_remuxed(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(32);
 
     let remuxing_cleanup = remuxing;
+    let active_streams_cleanup = active_streams.clone();
     let stem_cleanup = stem;
     std::thread::spawn(move || {
+        // Drop guard ensures `remuxing` and `active_streams` sets are cleaned up even on panic
+        struct Cleanup {
+            remuxing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+            active_streams: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+            stem: String,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                if let Ok(mut set) = self.remuxing.lock() {
+                    set.remove(&self.stem);
+                }
+                if let Ok(mut set) = self.active_streams.lock() {
+                    set.remove(&self.stem);
+                }
+            }
+        }
+        let _cleanup = Cleanup {
+            remuxing: remuxing_cleanup,
+            active_streams: active_streams_cleanup,
+            stem: stem_cleanup,
+        };
+
         use std::io::{Read, Write};
         let mut stdout = stdout;
         let mut cache = cache_file;
         let mut buf = vec![0u8; 256 * 1024];
+        let mut client_disconnected = false;
         loop {
             match stdout.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     let chunk = buf[..n].to_vec();
-                    // Write to cache
                     if let Some(ref mut f) = cache {
                         let _ = f.write_all(&chunk);
                     }
-                    // Send to HTTP response
                     if tx.blocking_send(Ok(chunk)).is_err() {
-                        break; // client disconnected
+                        // Client disconnected — stop pumping but let ffmpeg finish so cache completes
+                        client_disconnected = true;
+                        break;
                     }
                 }
                 Err(e) => {
@@ -806,23 +873,46 @@ async fn stream_remuxed(
                 }
             }
         }
-        let _ = child.wait();
-        // Rename tmp to final
+        // Even if the client left, drain stdout into the cache so the cached file is complete.
+        if client_disconnected {
+            loop {
+                match stdout.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if let Some(ref mut f) = cache {
+                            let _ = f.write_all(&buf[..n]);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+
+        let ffmpeg_ok = child.wait().map(|s| s.success()).unwrap_or(false);
         if let Some(ref mut f) = cache {
             let _ = f.flush();
         }
         drop(cache);
+
+        if !ffmpeg_ok {
+            tracing::warn!(
+                "ffmpeg remux failed for {:?}; discarding cache",
+                file_path.file_name().unwrap_or_default()
+            );
+            let _ = std::fs::remove_file(&tmp_path);
+            return;
+        }
+
         if std::fs::rename(&tmp_path, &final_path).is_ok() {
             tracing::info!("Remux cached: {:?}", final_path.file_name().unwrap());
-            // Delete original MKV since MP4 sibling now exists
-            if file_path.exists() {
-                if std::fs::remove_file(&file_path).is_ok() {
-                    tracing::info!("Deleted original: {:?}", file_path.file_name().unwrap());
-                }
+            // Delete original only after confirming the MP4 is readable and non-empty
+            let mp4_ok = final_path.metadata().map(|m| m.len() > 0).unwrap_or(false);
+            if mp4_ok && file_path.exists() && std::fs::remove_file(&file_path).is_ok() {
+                tracing::info!("Deleted original: {:?}", file_path.file_name().unwrap());
             }
+        } else {
+            let _ = std::fs::remove_file(&tmp_path);
         }
-        // Unmark from remuxing set
-        if let Ok(mut set) = remuxing_cleanup.lock() { set.remove(&stem_cleanup); }
     });
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -1072,7 +1162,15 @@ async fn fetch_metadata(State(state): State<Arc<AppState>>) -> ApiResult<Json<Fe
         let lib = state.library.read().await;
         lib.series
             .values()
-            .map(|s| (s.id.clone(), s.title.clone(), s.art.is_some(), s.backdrop.is_some(), s.tmdb_id_override))
+            .map(|s| {
+                (
+                    s.id.clone(),
+                    s.title.clone(),
+                    s.art.is_some(),
+                    s.backdrop.is_some(),
+                    s.tmdb_id_override,
+                )
+            })
             .collect()
     };
 
@@ -1096,9 +1194,10 @@ async fn get_episode_credits(
     State(state): State<Arc<AppState>>,
     Path(episode_id): Path<String>,
 ) -> ApiResult<Json<crate::tmdb::EpisodeCredits>> {
-    let tmdb_client = state.tmdb.as_ref().ok_or_else(|| {
-        ApiError::unavailable("TMDB API key not configured")
-    })?;
+    let tmdb_client = state
+        .tmdb
+        .as_ref()
+        .ok_or_else(|| ApiError::unavailable("TMDB API key not configured"))?;
 
     // Find the episode and its series
     let (series_id, season, episode) = {
@@ -1107,12 +1206,12 @@ async fn get_episode_credits(
             .find_episode(&episode_id)
             .ok_or_else(|| ApiError::not_found("Episode not found"))?;
 
-        let season = ep.season_number.ok_or_else(|| {
-            ApiError::not_found("Episode has no season/episode number — cannot look up credits")
-        })?;
-        let episode = ep.episode_number.ok_or_else(|| {
-            ApiError::not_found("Episode has no episode number — cannot look up credits")
-        })?;
+        let season = ep
+            .season_number
+            .ok_or_else(|| ApiError::not_found("Episode has no season/episode number — cannot look up credits"))?;
+        let episode = ep
+            .episode_number
+            .ok_or_else(|| ApiError::not_found("Episode has no episode number — cannot look up credits"))?;
         (series.id.clone(), season, episode)
     };
 
@@ -1165,7 +1264,12 @@ async fn prepare_episode(
 
     // If it's already MP4, it's ready
     if !needs_remux(&file_path) {
-        return Ok(Json(PrepareResponse { ready: true, needs_remux: false, remuxing: false, progress_percent: None }));
+        return Ok(Json(PrepareResponse {
+            ready: true,
+            needs_remux: false,
+            remuxing: false,
+            progress_percent: None,
+        }));
     }
 
     let stem = file_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
@@ -1176,24 +1280,36 @@ async fn prepare_episode(
 
     // Already remuxed?
     if mp4_path.exists() || legacy_mp4.exists() {
-        return Ok(Json(PrepareResponse { ready: true, needs_remux: true, remuxing: false, progress_percent: Some(100) }));
+        return Ok(Json(PrepareResponse {
+            ready: true,
+            needs_remux: true,
+            remuxing: false,
+            progress_percent: Some(100),
+        }));
     }
 
     // Currently remuxing? Report progress based on file size ratio
-    let is_remuxing = state.remuxing.lock()
-        .map(|s| s.contains(&stem))
-        .unwrap_or(false);
+    let is_remuxing = state.remuxing.lock().map(|s| s.contains(&stem)).unwrap_or(false);
 
     if is_remuxing || tmp_path.exists() {
         let progress = if let (Ok(tmp_meta), Ok(src_meta)) = (tmp_path.metadata(), file_path.metadata()) {
-            let src_size = src_meta.len() as f64;
-            let tmp_size = tmp_meta.len() as f64;
+            let src_size = src_meta.len();
+            let tmp_size = tmp_meta.len();
             // Rough estimate: remuxed MP4 is ~similar size to source
-            Some((tmp_size / src_size * 100.0).min(99.0) as u32)
+            if src_size > 0 {
+                Some((tmp_size as f64 / src_size as f64 * 100.0).min(99.0) as u32)
+            } else {
+                Some(0)
+            }
         } else {
             Some(0)
         };
-        return Ok(Json(PrepareResponse { ready: false, needs_remux: true, remuxing: true, progress_percent: progress }));
+        return Ok(Json(PrepareResponse {
+            ready: false,
+            needs_remux: true,
+            remuxing: true,
+            progress_percent: progress,
+        }));
     }
 
     // Not remuxing yet — kick it off now
@@ -1212,19 +1328,45 @@ async fn prepare_episode(
     let remuxing_ref = state.remuxing.clone();
     tokio::task::spawn_blocking(move || {
         let (video_codec, video_extra) = detect_video_codec(&file_path_clone);
-        tracing::info!("On-demand remux: {:?} (video: {video_codec})", file_path_clone.file_name().unwrap());
+        tracing::info!(
+            "On-demand remux: {:?} (video: {video_codec})",
+            file_path_clone.file_name().unwrap()
+        );
 
         let mut cmd = crate::media::ffmpeg_command();
-        cmd.arg("-hide_banner").arg("-loglevel").arg("warning")
-            .arg("-i").arg(&file_path_clone).arg("-c:v").arg(video_codec);
+        cmd.arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("warning")
+            .arg("-i")
+            .arg(&file_path_clone)
+            .arg("-c:v")
+            .arg(video_codec);
         if video_codec != "copy" {
-            for part in video_extra.split_whitespace() { cmd.arg(part); }
+            for part in video_extra.split_whitespace() {
+                cmd.arg(part);
+            }
         }
         let output = cmd
-            .arg("-c:a").arg("aac").arg("-b:a").arg("192k").arg("-ac").arg("2")
-            .arg("-map").arg("0:v:0").arg("-map").arg("0:a:0")
-            .arg("-map").arg("0:s?").arg("-c:s").arg("mov_text")
-            .arg("-movflags").arg("+faststart").arg("-f").arg("mp4").arg("-y").arg(&tmp_clone)
+            .arg("-c:a")
+            .arg("aac")
+            .arg("-b:a")
+            .arg("192k")
+            .arg("-ac")
+            .arg("2")
+            .arg("-map")
+            .arg("0:v:0")
+            .arg("-map")
+            .arg("0:a:0")
+            .arg("-map")
+            .arg("0:s?")
+            .arg("-c:s")
+            .arg("mov_text")
+            .arg("-movflags")
+            .arg("+faststart")
+            .arg("-f")
+            .arg("mp4")
+            .arg("-y")
+            .arg(&tmp_clone)
             .output();
 
         match output {
@@ -1251,7 +1393,12 @@ async fn prepare_episode(
         }
     });
 
-    Ok(Json(PrepareResponse { ready: false, needs_remux: true, remuxing: true, progress_percent: Some(0) }))
+    Ok(Json(PrepareResponse {
+        ready: false,
+        needs_remux: true,
+        remuxing: true,
+        progress_percent: Some(0),
+    }))
 }
 
 /// Trigger remux for all MKV episodes in a series
@@ -1260,7 +1407,8 @@ async fn remux_series(
     Path(series_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let lib = state.library.read().await;
-    let series = lib.find_series(&series_id)
+    let series = lib
+        .find_series(&series_id)
         .ok_or_else(|| ApiError::not_found("Series not found"))?;
 
     let mut triggered = 0;
@@ -1274,7 +1422,9 @@ async fn remux_series(
                 let tmp_path = ep_path.parent().unwrap().join(format!("{stem}.mp4.tmp"));
                 if !tmp_path.exists() {
                     if let Ok(mut set) = state.remuxing.lock() {
-                        if set.contains(&stem) { continue; }
+                        if set.contains(&stem) {
+                            continue;
+                        }
                         set.insert(stem.clone());
                     }
 
@@ -1286,19 +1436,44 @@ async fn remux_series(
 
                     tokio::task::spawn_blocking(move || {
                         let (video_codec, video_extra) = detect_video_codec(&ep_path_clone);
-                        tracing::info!("Batch remux: {:?} (video: {video_codec})", ep_path_clone.file_name().unwrap());
+                        tracing::info!(
+                            "Batch remux: {:?} (video: {video_codec})",
+                            ep_path_clone.file_name().unwrap()
+                        );
                         let mut cmd = crate::media::ffmpeg_command();
-                        cmd.arg("-hide_banner").arg("-loglevel").arg("warning")
-                            .arg("-i").arg(&ep_path_clone).arg("-c:v").arg(video_codec);
+                        cmd.arg("-hide_banner")
+                            .arg("-loglevel")
+                            .arg("warning")
+                            .arg("-i")
+                            .arg(&ep_path_clone)
+                            .arg("-c:v")
+                            .arg(video_codec);
                         if video_codec != "copy" {
-                            for part in video_extra.split_whitespace() { cmd.arg(part); }
+                            for part in video_extra.split_whitespace() {
+                                cmd.arg(part);
+                            }
                         }
                         let output = cmd
-                            .arg("-c:a").arg("aac").arg("-b:a").arg("192k").arg("-ac").arg("2")
-                            .arg("-map").arg("0:v:0").arg("-map").arg("0:a:0")
-                            .arg("-map").arg("0:s?").arg("-c:s").arg("mov_text")
-                            .arg("-movflags").arg("+faststart").arg("-f").arg("mp4")
-                            .arg("-y").arg(&tmp_clone)
+                            .arg("-c:a")
+                            .arg("aac")
+                            .arg("-b:a")
+                            .arg("192k")
+                            .arg("-ac")
+                            .arg("2")
+                            .arg("-map")
+                            .arg("0:v:0")
+                            .arg("-map")
+                            .arg("0:a:0")
+                            .arg("-map")
+                            .arg("0:s?")
+                            .arg("-c:s")
+                            .arg("mov_text")
+                            .arg("-movflags")
+                            .arg("+faststart")
+                            .arg("-f")
+                            .arg("mp4")
+                            .arg("-y")
+                            .arg(&tmp_clone)
                             .output();
                         match output {
                             Ok(result) if result.status.success() => {
@@ -1307,9 +1482,13 @@ async fn remux_series(
                                     let _ = std::fs::remove_file(&ep_path_clone);
                                 }
                             }
-                            _ => { let _ = std::fs::remove_file(&tmp_clone); }
+                            _ => {
+                                let _ = std::fs::remove_file(&tmp_clone);
+                            }
                         }
-                        if let Ok(mut set) = remuxing_ref.lock() { set.remove(&stem_clone); }
+                        if let Ok(mut set) = remuxing_ref.lock() {
+                            set.remove(&stem_clone);
+                        }
                     });
 
                     triggered += 1;
@@ -1336,9 +1515,7 @@ struct WatchedEpisode {
     format: String,
 }
 
-async fn get_watched_episodes(
-    State(state): State<Arc<AppState>>,
-) -> Json<Vec<WatchedEpisode>> {
+async fn get_watched_episodes(State(state): State<Arc<AppState>>) -> Json<Vec<WatchedEpisode>> {
     let lib = state.library.read().await;
     let all_progress = state.db.get_all_progress_map();
     let all_ep_meta = state.db.get_all_episode_metadata();
@@ -1347,14 +1524,16 @@ async fn get_watched_episodes(
     let all_series_meta = state.db.get_all_series_metadata();
 
     for series in lib.series.values() {
-        let display_title = all_series_meta.get(&series.id)
+        let display_title = all_series_meta
+            .get(&series.id)
             .and_then(|m| m.title.clone())
             .unwrap_or_else(|| series.title.clone());
 
         for ep in &series.episodes {
             if let Some(progress) = all_progress.get(&ep.id) {
                 if progress.completed {
-                    let tmdb_meta = ep.season_number
+                    let tmdb_meta = ep
+                        .season_number
                         .zip(ep.episode_number)
                         .and_then(|(s, e)| all_ep_meta.get(&(series.id.clone(), s, e)));
 
@@ -1407,9 +1586,7 @@ async fn get_watched_episodes(
 }
 
 /// Trigger an immediate library rescan + TMDB metadata fetch
-async fn rescan_library(
-    State(state): State<Arc<AppState>>,
-) -> ApiResult<Json<serde_json::Value>> {
+async fn rescan_library(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     state.log("Manual rescan triggered");
 
     match crate::library::Library::scan(&state.media_path) {
@@ -1419,30 +1596,51 @@ async fn rescan_library(
 
             // Fetch TMDB metadata for series missing it
             if let Some(ref client) = state.tmdb {
-                let needs_meta: Vec<_> = lib.series.values()
-                    .filter(|s| !s.art.is_some() || !s.backdrop.is_some() || state.db.get_series_metadata(&s.id).is_none())
-                    .map(|s| (s.id.clone(), s.title.clone(), s.art.is_some(), s.backdrop.is_some(), s.tmdb_id_override))
+                let needs_meta: Vec<_> = lib
+                    .series
+                    .values()
+                    .filter(|s| {
+                        s.art.is_none() || s.backdrop.is_none() || state.db.get_series_metadata(&s.id).is_none()
+                    })
+                    .map(|s| {
+                        (
+                            s.id.clone(),
+                            s.title.clone(),
+                            s.art.is_some(),
+                            s.backdrop.is_some(),
+                            s.tmdb_id_override,
+                        )
+                    })
                     .collect();
 
                 if !needs_meta.is_empty() {
                     let count = needs_meta.len();
                     state.log(&format!("Fetching TMDB metadata for {count} series..."));
-                    let downloaded = crate::tmdb::fetch_all_metadata(client, &state.db, &state.media_path, needs_meta).await;
+                    let downloaded =
+                        crate::tmdb::fetch_all_metadata(client, &state.db, &state.media_path, needs_meta).await;
                     if downloaded > 0 {
                         state.log(&format!("Downloaded artwork for {downloaded} series"));
                     }
                     // Rescan again to pick up new art
                     if let Ok(updated) = crate::library::Library::scan(&state.media_path) {
                         *state.library.write().await = updated;
-                        state.log(&format!("Rescan complete: {series_count} series, {episode_count} episodes"));
-                        return Ok(Json(serde_json::json!({ "series": series_count, "episodes": episode_count })));
+                        state.log(&format!(
+                            "Rescan complete: {series_count} series, {episode_count} episodes"
+                        ));
+                        return Ok(Json(
+                            serde_json::json!({ "series": series_count, "episodes": episode_count }),
+                        ));
                     }
                 }
             }
 
             *state.library.write().await = lib;
-            state.log(&format!("Rescan complete: {series_count} series, {episode_count} episodes"));
-            Ok(Json(serde_json::json!({ "series": series_count, "episodes": episode_count })))
+            state.log(&format!(
+                "Rescan complete: {series_count} series, {episode_count} episodes"
+            ));
+            Ok(Json(
+                serde_json::json!({ "series": series_count, "episodes": episode_count }),
+            ))
         }
         Err(e) => {
             state.log(&format!("Rescan failed: {e}"));
@@ -1458,7 +1656,8 @@ async fn delete_series(
 ) -> ApiResult<Json<serde_json::Value>> {
     let series_title = {
         let lib = state.library.read().await;
-        let series = lib.find_series(&series_id)
+        let series = lib
+            .find_series(&series_id)
             .ok_or_else(|| ApiError::not_found("Series not found"))?;
         series.title.clone()
     };
@@ -1466,8 +1665,7 @@ async fn delete_series(
     // Delete the series folder
     let series_dir = state.media_path.join(&series_title);
     if series_dir.exists() {
-        std::fs::remove_dir_all(&series_dir)
-            .map_err(|e| ApiError::internal(&format!("Failed to delete: {e}")))?;
+        std::fs::remove_dir_all(&series_dir).map_err(|e| ApiError::internal(&format!("Failed to delete: {e}")))?;
     }
 
     // Clean up DB metadata
@@ -1489,12 +1687,14 @@ async fn delete_episode(
 ) -> ApiResult<Json<serde_json::Value>> {
     let file_path = {
         let lib = state.library.read().await;
-        let (_series, episode) = lib.find_episode(&episode_id)
+        let (_series, episode) = lib
+            .find_episode(&episode_id)
             .ok_or_else(|| ApiError::not_found("Episode not found"))?;
         state.media_path.join(&episode.path)
     };
 
-    let filename = file_path.file_name()
+    let filename = file_path
+        .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown")
         .to_string();
@@ -1511,7 +1711,9 @@ async fn delete_episode(
                     // This catches: video.mkv, video.mp4, video.srt, video.en.srt, video.mp4.tmp
                     if entry_stem_str == stem_str
                         || entry_stem_str.starts_with(&format!("{stem_str}."))
-                        || entry_path.to_string_lossy().starts_with(&format!("{}/{stem_str}.", parent.display()))
+                        || entry_path
+                            .to_string_lossy()
+                            .starts_with(&format!("{}/{stem_str}.", parent.display()))
                     {
                         let _ = std::fs::remove_file(&entry_path);
                     }
@@ -1537,9 +1739,10 @@ async fn get_person(
     State(state): State<Arc<AppState>>,
     Path(person_id): Path<u64>,
 ) -> ApiResult<Json<crate::tmdb::PersonDetail>> {
-    let tmdb_client = state.tmdb.as_ref().ok_or_else(|| {
-        ApiError::unavailable("TMDB API key not configured")
-    })?;
+    let tmdb_client = state
+        .tmdb
+        .as_ref()
+        .ok_or_else(|| ApiError::unavailable("TMDB API key not configured"))?;
 
     let person = tmdb_client
         .get_person_detail(person_id)
@@ -1583,7 +1786,7 @@ mod tests {
             db,
             media_path: dir.path().to_path_buf(),
             tmdb: None,
-            active_streams: std::sync::Mutex::new(std::collections::HashSet::new()),
+            active_streams: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             log: None,
         });
@@ -1887,7 +2090,7 @@ mod tests {
             db,
             media_path: dir.path().to_path_buf(),
             tmdb: None,
-            active_streams: std::sync::Mutex::new(std::collections::HashSet::new()),
+            active_streams: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             log: None,
         });
@@ -1952,7 +2155,7 @@ mod tests {
             db,
             media_path: dir.path().to_path_buf(),
             tmdb: None,
-            active_streams: std::sync::Mutex::new(std::collections::HashSet::new()),
+            active_streams: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             log: None,
         });
@@ -2171,7 +2374,7 @@ mod tests {
             db,
             media_path: dir.path().to_path_buf(),
             tmdb: None,
-            active_streams: std::sync::Mutex::new(std::collections::HashSet::new()),
+            active_streams: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             log: None,
         });

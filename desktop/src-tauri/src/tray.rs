@@ -1,10 +1,13 @@
 use tauri::{
-    AppHandle, Manager,
     menu::{Menu, MenuItem, PredefinedMenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Manager,
 };
 
-pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
+/// Build the tray icon and return ownership to the caller.
+/// Tauri keeps the icon alive only while some owner holds the handle, so callers must
+/// store it (e.g., in app state) to keep the tray visible.
+pub fn setup_tray(app: &AppHandle) -> tauri::Result<TrayIcon> {
     let show = MenuItem::with_id(app, "show", "Show Cast Server", true, None::<&str>)?;
     let hide = MenuItem::with_id(app, "hide", "Hide Window", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
@@ -12,9 +15,12 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 
     let menu = Menu::with_items(app, &[&show, &hide, &separator, &quit])?;
 
-    let _tray = TrayIconBuilder::new()
+    TrayIconBuilder::new()
         .tooltip("Cast — Media Server")
-        .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/tray-32x32.png")).expect("tray icon"))
+        .icon(
+            tauri::image::Image::from_bytes(include_bytes!("../icons/tray-32x32.png"))
+                .expect("tray icon"),
+        )
         .icon_as_template(false)
         .menu(&menu)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -48,7 +54,5 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                 }
             }
         })
-        .build(app)?;
-
-    Ok(())
+        .build(app)
 }

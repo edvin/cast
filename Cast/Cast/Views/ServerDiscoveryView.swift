@@ -159,9 +159,11 @@ struct ServerDiscoveryView: View {
     }
 
     private func connectManually() {
-        let parts = manualAddress.split(separator: ":")
-        let host = String(parts[0])
-        let port: UInt16 = parts.count > 1 ? UInt16(parts[1]) ?? 3456 : 3456
+        let trimmed = manualAddress.trimmingCharacters(in: .whitespaces)
+        guard let (host, port) = parseHostPort(trimmed) else {
+            errorMessage = "Enter a valid address like 192.168.1.50:3456 or [::1]:3456"
+            return
+        }
         isConnecting = true
         errorMessage = nil
         Task {
@@ -169,8 +171,35 @@ struct ServerDiscoveryView: View {
         }
     }
 
+    /// Parses "host", "host:port", or "[ipv6]:port" into (host, port). Defaults to port 3456.
+    /// Returns nil if the port is out of the valid range 1...65535.
+    private func parseHostPort(_ input: String) -> (String, UInt16)? {
+        guard !input.isEmpty else { return nil }
+        // IPv6 literal in brackets, optionally followed by :port
+        if input.hasPrefix("[") {
+            guard let end = input.firstIndex(of: "]") else { return nil }
+            let host = String(input[input.index(after: input.startIndex)..<end])
+            let rest = input[input.index(after: end)...]
+            if rest.isEmpty { return (host, 3456) }
+            guard rest.first == ":" else { return nil }
+            let portStr = rest.dropFirst()
+            guard let p = Int(portStr), (1...65535).contains(p) else { return nil }
+            return (host, UInt16(p))
+        }
+        // Bare IPv4/hostname, optionally with :port
+        if let colonIdx = input.lastIndex(of: ":"), input.filter({ $0 == ":" }).count == 1 {
+            let host = String(input[..<colonIdx])
+            let portStr = input[input.index(after: colonIdx)...]
+            guard let p = Int(portStr), (1...65535).contains(p) else { return nil }
+            return (host.isEmpty ? "127.0.0.1" : host, UInt16(p))
+        }
+        return (input, 3456)
+    }
+
     private func validateAndConnect(host: String, port: UInt16) async {
-        let urlString = "http://\(host):\(port)/api/series"
+        // IPv6 literals must be bracketed in URLs
+        let hostPart = host.contains(":") ? "[\(host)]" : host
+        let urlString = "http://\(hostPart):\(port)/api/series"
         print("[Cast] Validating connection to \(urlString)")
         guard let url = URL(string: urlString) else {
             isConnecting = false

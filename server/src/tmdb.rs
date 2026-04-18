@@ -151,13 +151,13 @@ struct TmdbCombinedCredits {
 struct TmdbCreditRole {
     id: u64,
     media_type: Option<String>,
-    title: Option<String>,       // for movies
-    name: Option<String>,        // for TV
+    title: Option<String>, // for movies
+    name: Option<String>,  // for TV
     character: Option<String>,
     poster_path: Option<String>,
     vote_average: Option<f64>,
-    release_date: Option<String>,    // movies
-    first_air_date: Option<String>,  // TV
+    release_date: Option<String>,   // movies
+    first_air_date: Option<String>, // TV
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -385,7 +385,9 @@ impl TmdbClient {
             .map(|c| {
                 let title = c.title.or(c.name).unwrap_or_default();
                 let media_type = c.media_type.unwrap_or_else(|| "unknown".to_string());
-                let year = c.release_date.or(c.first_air_date)
+                let year = c
+                    .release_date
+                    .or(c.first_air_date)
                     .and_then(|d| d.get(..4).map(|s| s.to_string()));
                 CreditRole {
                     id: c.id,
@@ -399,8 +401,13 @@ impl TmdbClient {
             })
             .collect();
 
-        // Sort by rating descending (best known roles first)
-        known_for.sort_by(|a, b| b.rating.partial_cmp(&a.rating).unwrap_or(std::cmp::Ordering::Equal));
+        // Sort by rating descending (best known roles first). Ratings are optional and can be
+        // NaN from malformed TMDB payloads, so normalise to a total-orderable f64 via total_cmp.
+        known_for.sort_by(|a, b| {
+            let ar = a.rating.filter(|r| r.is_finite()).unwrap_or(f64::NEG_INFINITY);
+            let br = b.rating.filter(|r| r.is_finite()).unwrap_or(f64::NEG_INFINITY);
+            br.total_cmp(&ar)
+        });
 
         Ok(Some(PersonDetail {
             id: detail.id,
@@ -423,7 +430,7 @@ impl TmdbClient {
 
     /// Download a poster image and save it to the series directory
     pub async fn download_poster(&self, series_dir: &Path, poster_url: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let ext = if poster_url.ends_with(".png") { "png" } else { "jpg" };
+        let ext = image_extension(poster_url);
         let dest = series_dir.join(format!(".poster.{ext}"));
         self.download_image(poster_url, &dest).await?;
         tracing::info!("Downloaded poster to {dest:?}");
@@ -436,11 +443,22 @@ impl TmdbClient {
         series_dir: &Path,
         backdrop_url: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let ext = if backdrop_url.ends_with(".png") { "png" } else { "jpg" };
+        let ext = image_extension(backdrop_url);
         let dest = series_dir.join(format!(".backdrop.{ext}"));
         self.download_image(backdrop_url, &dest).await?;
         tracing::info!("Downloaded backdrop to {dest:?}");
         Ok(())
+    }
+}
+
+/// Extract the file extension from an image URL, ignoring query strings and fragments.
+/// Defaults to "jpg" if no recognised extension is found.
+fn image_extension(url: &str) -> &'static str {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    if path.to_ascii_lowercase().ends_with(".png") {
+        "png"
+    } else {
+        "jpg"
     }
 }
 

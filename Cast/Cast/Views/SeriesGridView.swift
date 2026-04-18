@@ -173,11 +173,15 @@ struct SeriesGridView: View {
     private func refreshMetadata() async {
         guard let client else { return }
         isRefreshing = true
+        defer { isRefreshing = false }
         do {
             try await client.fetchMetadata()
             await loadData()
-        } catch {}
-        isRefreshing = false
+        } catch let err as CastError {
+            self.error = err
+        } catch {
+            self.error = .networkError(error.localizedDescription)
+        }
     }
 }
 

@@ -115,7 +115,7 @@ fn strip_release_tags(s: &str) -> String {
     if let Some(m) = RE_TAGS.find(s) {
         let before = s[..m.start()].trim();
         // Also strip trailing dash and group name (e.g. "-SYLIX")
-        let before = before.trim_end_matches(|c: char| c == '-' || c == '.' || c == ' ');
+        let before = before.trim_end_matches(['-', '.', ' ']);
         return before.to_string(); // may be empty — caller handles that
     }
     // Strip trailing group tag like "-SYLIX" if present
@@ -135,8 +135,10 @@ fn strip_release_tags(s: &str) -> String {
 static RE_SXXEXX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)[Ss](\d+)[Ee](\d+)[\s.\-]*(.*)$").unwrap());
 static RE_NNXNN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(?:^|[\s.])(\d+)x(\d+)[\s.\-]*(.*)$").unwrap());
 // Compact 4-digit SSEE format: e.g. "0201" = S02E01, bounded by non-digits
-static RE_COMPACT_SSEE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:^|[.\-\s])(\d{2})(\d{2})(?:[.\-\s]|$)").unwrap());
-static RE_EPISODE_WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(?:^|[\s.])Episode\s+(\d+)[\s.\-]*(.*)$").unwrap());
+static RE_COMPACT_SSEE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:^|[.\-\s])(\d{2})(\d{2})(?:[.\-\s]|$)").unwrap());
+static RE_EPISODE_WORD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(?:^|[\s.])Episode\s+(\d+)[\s.\-]*(.*)$").unwrap());
 static RE_BARE_NUM_TITLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+)[\s.\-]+(.+)$").unwrap());
 static RE_BARE_NUM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+)$").unwrap());
 

@@ -1,34 +1,27 @@
 import SwiftUI
 import AVKit
 
-// MARK: - Player Container (handles Menu button dismiss on real Apple TV)
+// MARK: - Movie Player Container
 
-struct PlayerContainerView: View {
+struct MoviePlayerContainerView: View {
     let client: APIClient
-    let episode: EpisodeItem
+    let movie: MovieDetail
     let resumePosition: Double
 
     @Environment(\.dismiss) private var dismiss
-    @State private var showCast = false
     @State private var playerRef: AVPlayer?
 
     var body: some View {
-        PlayerView(
+        MoviePlayerView(
             client: client,
-            episode: episode,
+            movie: movie,
             resumePosition: resumePosition,
             onDismiss: { stopAndDismiss() },
-            onShowCast: { showCast = true },
             onPlayerReady: { playerRef = $0 }
         )
         .ignoresSafeArea()
-        .onExitCommand {
-            if !showCast { stopAndDismiss() }
-        }
+        .onExitCommand { stopAndDismiss() }
         .onDisappear { stopPlayer() }
-        .fullScreenCover(isPresented: $showCast) {
-            CastNavigationWrapper(episode: episode, client: client)
-        }
     }
 
     private func stopPlayer() {
@@ -42,54 +35,28 @@ struct PlayerContainerView: View {
     }
 }
 
-// MARK: - Cast Navigation Wrapper (handles back button correctly)
+// MARK: - Movie Player
 
-private struct CastNavigationWrapper: View {
-    let episode: EpisodeItem
+struct MoviePlayerView: UIViewControllerRepresentable {
     let client: APIClient
-
-    var body: some View {
-        NavigationStack {
-            EpisodeCastView(episode: episode, client: client)
-                .navigationDestination(for: Int.self) { personId in
-                    ActorDetailView(personId: personId, client: client)
-                }
-        }
-    }
-}
-
-// MARK: - Player (UIViewControllerRepresentable)
-
-struct PlayerView: UIViewControllerRepresentable {
-    let client: APIClient
-    let episode: EpisodeItem
+    let movie: MovieDetail
     let resumePosition: Double
     var onDismiss: (() -> Void)?
-    var onShowCast: (() -> Void)?
     var onPlayerReady: ((AVPlayer) -> Void)?
 
     @Environment(\.dismiss) private var dismiss
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let controller = AVPlayerViewController()
-        let url = client.streamURL(episodeId: episode.id)
+        let url = client.movieStreamURL(movieId: movie.id)
         let player = AVPlayer(url: url)
         controller.player = player
         controller.delegate = context.coordinator
 
-        // Add Cast & Crew button to the transport bar
-        let castAction = UIAction(title: "Cast & Crew", image: UIImage(systemName: "person.2")) { _ in
-            // Pause playback while showing cast
-            player.pause()
-            context.coordinator.parent.onShowCast?()
-        }
-        controller.transportBarCustomMenuItems = [castAction]
-
-        // External subtitles panel (if episode has external .srt files)
-        if episode.hasExternalSubtitles {
-            let subsVC = ExternalSubtitleViewController(
+        if movie.hasExternalSubtitles {
+            let subsVC = ExternalMovieSubtitleViewController(
                 client: client,
-                episode: episode,
+                movie: movie,
                 player: player
             )
             controller.customInfoViewControllers = [subsVC]
@@ -103,17 +70,15 @@ struct PlayerView: UIViewControllerRepresentable {
 
     func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {}
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(self)
-    }
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     class Coordinator: NSObject, AVPlayerViewControllerDelegate {
-        let parent: PlayerView
+        let parent: MoviePlayerView
         private var progressReporter: ProgressReporter?
         private var playerRef: AVPlayer?
         weak var controller: AVPlayerViewController?
 
-        init(_ parent: PlayerView) {
+        init(_ parent: MoviePlayerView) {
             self.parent = parent
             super.init()
         }
@@ -130,17 +95,15 @@ struct PlayerView: UIViewControllerRepresentable {
                 player.play()
             }
 
-            // Auto-select English subtitles
             loadSubtitles(player: player)
 
-            // Start progress reporting
             let reporter = ProgressReporter()
             let client = parent.client
-            let episodeId = parent.episode.id
+            let movieId = parent.movie.id
             reporter.start(
                 updater: { position, duration in
-                    try? await client.updateProgress(
-                        episodeId: episodeId, position: position, duration: duration
+                    try? await client.updateMovieProgress(
+                        movieId: movieId, position: position, duration: duration
                     )
                 },
                 positionProvider: { [weak player] in
@@ -153,7 +116,6 @@ struct PlayerView: UIViewControllerRepresentable {
             )
             self.progressReporter = reporter
 
-            // Observe end of playback
             NotificationCenter.default.addObserver(
                 self,
                 selector: #selector(playerDidFinish),
@@ -161,7 +123,6 @@ struct PlayerView: UIViewControllerRepresentable {
                 object: player.currentItem
             )
 
-            // Add Menu button press recognizer as fallback dismiss
             if let controller {
                 let menuPress = UITapGestureRecognizer(target: self, action: #selector(menuPressed))
                 menuPress.allowedPressTypes = [NSNumber(value: UIPress.PressType.menu.rawValue)]
@@ -171,18 +132,14 @@ struct PlayerView: UIViewControllerRepresentable {
 
         private func loadSubtitles(player: AVPlayer) {
             guard let item = player.currentItem else { return }
-
             Task {
                 if let group = try? await item.asset.loadMediaSelectionGroup(for: .legible) {
-                    // Auto-select English subtitles if available
                     let english = AVMediaSelectionGroup.mediaSelectionOptions(
                         from: group.options,
                         with: Locale(identifier: "en")
                     ).first
                     if let track = english {
-                        await MainActor.run {
-                            item.select(track, in: group)
-                        }
+                        await MainActor.run { item.select(track, in: group) }
                     }
                 }
             }
@@ -190,16 +147,12 @@ struct PlayerView: UIViewControllerRepresentable {
 
         @objc private func menuPressed() {
             reportFinalProgress()
-            Task { @MainActor in
-                parent.onDismiss?() ?? parent.dismiss()
-            }
+            Task { @MainActor in parent.onDismiss?() ?? parent.dismiss() }
         }
 
         @objc private func playerDidFinish(_ notification: Notification) {
             reportFinalProgress()
-            Task { @MainActor in
-                parent.onDismiss?() ?? parent.dismiss()
-            }
+            Task { @MainActor in parent.onDismiss?() ?? parent.dismiss() }
         }
 
         nonisolated func playerViewControllerDidEndDismissalTransition(_ playerViewController: AVPlayerViewController) {
@@ -210,7 +163,6 @@ struct PlayerView: UIViewControllerRepresentable {
         }
 
         nonisolated func playerViewControllerShouldDismiss(_ playerViewController: AVPlayerViewController) -> Bool {
-            // Pause immediately so audio stops before the dismiss animation
             MainActor.assumeIsolated {
                 playerViewController.player?.pause()
             }
@@ -237,20 +189,19 @@ struct PlayerView: UIViewControllerRepresentable {
     }
 }
 
-// MARK: - External Subtitle Panel (shown in player info view)
+// MARK: - External Subtitle Panel (movies)
 
-final class ExternalSubtitleViewController: UIViewController {
+final class ExternalMovieSubtitleViewController: UIViewController {
     private let client: APIClient
-    private let episode: EpisodeItem
+    private let movie: MovieDetail
     private weak var player: AVPlayer?
     private var subtitles: [SubtitleInfo] = []
     private var activeLanguage: String?
-    private var legibleOutput: AVPlayerItemLegibleOutput?
     private var stackView: UIStackView!
 
-    init(client: APIClient, episode: EpisodeItem, player: AVPlayer) {
+    init(client: APIClient, movie: MovieDetail, player: AVPlayer) {
         self.client = client
-        self.episode = episode
+        self.movie = movie
         self.player = player
         super.init(nibName: nil, bundle: nil)
         self.title = "External Subtitles"
@@ -266,7 +217,6 @@ final class ExternalSubtitleViewController: UIViewController {
         stackView.spacing = 20
         stackView.alignment = .center
         stackView.translatesAutoresizingMaskIntoConstraints = false
-
         view.addSubview(stackView)
         NSLayoutConstraint.activate([
             stackView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
@@ -280,7 +230,7 @@ final class ExternalSubtitleViewController: UIViewController {
     private func loadSubtitles() {
         Task {
             do {
-                let subs = try await client.listSubtitles(episodeId: episode.id)
+                let subs = try await client.listMovieSubtitles(movieId: movie.id)
                 await MainActor.run {
                     self.subtitles = subs
                     self.buildButtons()
@@ -291,14 +241,9 @@ final class ExternalSubtitleViewController: UIViewController {
 
     private func buildButtons() {
         stackView.arrangedSubviews.forEach { $0.removeFromSuperview() }
-
-        // "Off" button
-        let offButton = makeButton(title: "Off", language: nil)
-        stackView.addArrangedSubview(offButton)
-
+        stackView.addArrangedSubview(makeButton(title: "Off", language: nil))
         for sub in subtitles {
-            let button = makeButton(title: sub.label, language: sub.language)
-            stackView.addArrangedSubview(button)
+            stackView.addArrangedSubview(makeButton(title: sub.label, language: sub.language))
         }
     }
 
@@ -319,33 +264,26 @@ final class ExternalSubtitleViewController: UIViewController {
 
     private func selectSubtitle(language: String?) {
         activeLanguage = language
-        buildButtons() // Refresh button states
-
+        buildButtons()
         guard let player, let item = player.currentItem else { return }
 
         if let lang = language {
             Task {
                 if let group = try? await item.asset.loadMediaSelectionGroup(for: .legible) {
-                    // Match "en", "en-US", "eng" etc. against the requested 2-letter code
                     let normalized = lang.lowercased()
                     let options = group.options.filter { option in
                         guard let id = option.locale?.language.languageCode?.identifier.lowercased() else { return false }
                         return id == normalized || id.hasPrefix(normalized) || normalized.hasPrefix(id)
                     }
                     if let option = options.first {
-                        await MainActor.run {
-                            item.select(option, in: group)
-                        }
+                        await MainActor.run { item.select(option, in: group) }
                     }
                 }
             }
         } else {
-            // Turn off subtitles
             Task {
                 if let group = try? await item.asset.loadMediaSelectionGroup(for: .legible) {
-                    await MainActor.run {
-                        item.select(nil, in: group)
-                    }
+                    await MainActor.run { item.select(nil, in: group) }
                 }
             }
         }

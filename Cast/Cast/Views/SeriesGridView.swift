@@ -4,6 +4,7 @@ struct SeriesGridView: View {
     @Environment(ServerConnection.self) private var connection
     @State private var seriesList: [SeriesListItem] = []
     @State private var continueWatchingItems: [ContinueWatchingItem] = []
+    @State private var movieCount: Int = 0
     @State private var isLoading = true
     @State private var error: CastError?
     @State private var isRefreshing = false
@@ -44,6 +45,10 @@ struct SeriesGridView: View {
                         VStack(alignment: .leading, spacing: 24) {
                             if !continueWatchingItems.isEmpty {
                                 continueWatchingSection
+                            }
+
+                            if movieCount > 0 {
+                                moviesEntrySection
                             }
 
                             librarySection
@@ -98,7 +103,41 @@ struct SeriesGridView: View {
         .navigationDestination(for: SeriesListItem.self) { series in
             SeriesDetailView(seriesId: series.id, seriesTitle: series.title)
         }
+        .navigationDestination(for: MoviesDestination.self) { _ in
+            MoviesGridView()
+        }
+        .navigationDestination(for: MovieListItem.self) { movie in
+            MovieDetailView(movieId: movie.id)
+        }
         .task { await loadData() }
+    }
+
+    // MARK: - Movies entry card
+
+    private var moviesEntrySection: some View {
+        NavigationLink(value: MoviesDestination()) {
+            HStack(spacing: 24) {
+                Image(systemName: "film.stack.fill")
+                    .font(.system(size: 40))
+                    .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Movies")
+                        .font(.title3)
+                        .bold()
+                    Text("\(movieCount) title\(movieCount == 1 ? "" : "s") in library")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 28)
+            .padding(.vertical, 22)
+            .background(RoundedRectangle(cornerRadius: 18).fill(Color(white: 0.14)))
+        }
+        .buttonStyle(NoChromeFocusButtonStyle())
+        .padding(.horizontal, 80)
     }
 
     // MARK: - Continue Watching
@@ -160,8 +199,10 @@ struct SeriesGridView: View {
         do {
             async let seriesReq = client.listSeries()
             async let continueReq = client.continueWatching()
+            async let moviesReq = client.listMovies()
             seriesList = try await seriesReq
             continueWatchingItems = (try? await continueReq) ?? []
+            movieCount = (try? await moviesReq)?.count ?? 0
         } catch let err as CastError {
             error = err
         } catch {

@@ -1,32 +1,27 @@
 import Foundation
 
+/// Reports playback progress to the server every 10 seconds while playing, plus a final
+/// write on stop. Uses a caller-supplied update closure so it works for both series
+/// episodes and movies without knowing their specific API endpoints.
 @Observable
 final class ProgressReporter {
+    typealias Updater = @Sendable (_ position: Double, _ duration: Double) async -> Void
+
     private var timer: Timer?
-    private var client: APIClient?
-    private var episodeId: String?
+    private var updater: Updater?
     private var inflightTasks: [Task<Void, Never>] = []
 
     func start(
-        client: APIClient,
-        episodeId: String,
+        updater: @escaping Updater,
         positionProvider: @Sendable @escaping () -> (position: Double, duration: Double)?
     ) {
-        self.client = client
-        self.episodeId = episodeId
-
+        self.updater = updater
         timer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             guard let self,
-                  let client = self.client,
-                  let episodeId = self.episodeId,
+                  let updater = self.updater,
                   let pos = positionProvider() else { return }
-
             let task = Task { [weak self] in
-                try? await client.updateProgress(
-                    episodeId: episodeId,
-                    position: pos.position,
-                    duration: pos.duration
-                )
+                await updater(pos.position, pos.duration)
                 self?.inflightTasks.removeAll { $0.isCancelled }
             }
             self.inflightTasks.append(task)
@@ -40,18 +35,13 @@ final class ProgressReporter {
         for task in inflightTasks { task.cancel() }
         inflightTasks.removeAll()
 
-        guard let client, let episodeId else { return }
+        guard let updater else { return }
         // Fire-and-forget final write; bound by URLSession's timeout so it can't leak indefinitely.
         Task {
-            try? await client.updateProgress(
-                episodeId: episodeId,
-                position: finalPosition,
-                duration: finalDuration
-            )
+            await updater(finalPosition, finalDuration)
         }
 
-        self.client = nil
-        self.episodeId = nil
+        self.updater = nil
     }
 
     deinit {

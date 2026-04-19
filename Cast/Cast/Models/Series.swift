@@ -245,6 +245,62 @@ struct PrepareResponse: Codable {
     }
 }
 
+// MARK: - Movies
+
+struct MovieListItem: Codable, Identifiable, Hashable {
+    let id: String
+    let title: String
+    let year: String?
+    let path: String
+    let sizeBytes: Int64
+    let hasArt: Bool
+    let hasBackdrop: Bool
+    let hasMetadata: Bool
+    let overview: String?
+    let genres: String?
+    let rating: Double?
+    let runtimeMinutes: Int?
+    let tagline: String?
+    let progress: EpisodeProgress?
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, year, path, overview, genres, rating, tagline, progress
+        case sizeBytes = "size_bytes"
+        case hasArt = "has_art"
+        case hasBackdrop = "has_backdrop"
+        case hasMetadata = "has_metadata"
+        case runtimeMinutes = "runtime_minutes"
+    }
+}
+
+struct MovieDetail: Codable, Identifiable {
+    let id: String
+    let title: String
+    let year: String?
+    let path: String
+    let sizeBytes: Int64
+    let hasArt: Bool
+    let hasBackdrop: Bool
+    let hasMetadata: Bool
+    let overview: String?
+    let genres: String?
+    let rating: Double?
+    let runtimeMinutes: Int?
+    let tagline: String?
+    let progress: EpisodeProgress?
+    let hasExternalSubtitles: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, year, path, overview, genres, rating, tagline, progress
+        case sizeBytes = "size_bytes"
+        case hasArt = "has_art"
+        case hasBackdrop = "has_backdrop"
+        case hasMetadata = "has_metadata"
+        case runtimeMinutes = "runtime_minutes"
+        case hasExternalSubtitles = "has_external_subtitles"
+    }
+}
+
 // MARK: - Server Error Response
 
 struct ApiError: Codable {

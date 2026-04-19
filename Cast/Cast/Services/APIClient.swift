@@ -166,4 +166,67 @@ struct APIClient {
     func subtitleURL(episodeId: String, language: String) -> URL {
         url("api", "episodes", episodeId, "subtitles", language)
     }
+
+    // MARK: - Movies
+
+    func listMovies() async throws -> [MovieListItem] {
+        try await request(url("api", "movies"))
+    }
+
+    func getMovie(id: String) async throws -> MovieDetail {
+        try await request(url("api", "movies", id))
+    }
+
+    func movieArtURL(movieId: String) -> URL {
+        url("api", "movies", movieId, "art")
+    }
+
+    func movieBackdropURL(movieId: String) -> URL {
+        url("api", "movies", movieId, "backdrop")
+    }
+
+    func movieThumbnailURL(movieId: String) -> URL {
+        url("api", "movies", movieId, "thumbnail")
+    }
+
+    func movieStreamURL(movieId: String) -> URL {
+        url("api", "movies", movieId, "stream")
+    }
+
+    func getMovieProgress(movieId: String) async throws -> EpisodeProgress? {
+        try await request(url("api", "movies", movieId, "progress"))
+    }
+
+    func updateMovieProgress(movieId: String, position: Double, duration: Double) async throws {
+        var req = requestURL(url("api", "movies", movieId, "progress"), method: "POST")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body = ProgressUpdate(positionSecs: position, durationSecs: duration)
+        req.httpBody = try JSONEncoder().encode(body)
+        let (_, response) = try await URLSession.shared.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw URLError(.badServerResponse)
+        }
+    }
+
+    func deleteMovieProgress(movieId: String) async throws {
+        let req = requestURL(url("api", "movies", movieId, "progress"), method: "DELETE")
+        let _ = try await URLSession.shared.data(for: req)
+    }
+
+    func prepareMovie(movieId: String) async throws -> PrepareResponse {
+        let req = requestURL(url("api", "movies", movieId, "prepare"), method: "POST")
+        let (data, response) = try await URLSession.shared.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw CastError.networkError("Failed to prepare movie")
+        }
+        return try JSONDecoder().decode(PrepareResponse.self, from: data)
+    }
+
+    func listMovieSubtitles(movieId: String) async throws -> [SubtitleInfo] {
+        try await request(url("api", "movies", movieId, "subtitles"))
+    }
+
+    func movieSubtitleURL(movieId: String, language: String) -> URL {
+        url("api", "movies", movieId, "subtitles", language)
+    }
 }

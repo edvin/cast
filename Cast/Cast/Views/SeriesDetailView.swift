@@ -19,6 +19,11 @@ struct SeriesDetailView: View {
     @State private var preparingEpisode: EpisodeItem?
     @State private var prepareProgress: Int?
 
+    /// Solid surface used both as the page background and as the target colour for
+    /// the hero's bottom-fade gradient. Keeping these in one place means the seam
+    /// between hero and content is invisible.
+    static let pageBackground = Color(white: 0.06)
+
     private var client: APIClient? {
         guard let url = connection.baseURL else { return nil }
         return APIClient(baseURL: url)
@@ -37,20 +42,10 @@ struct SeriesDetailView: View {
                 ProgressView()
             } else if let detail {
                 ZStack {
-                    // Full-page blurred backdrop background
-                    if detail.hasBackdrop, let client {
-                        AsyncImage(url: client.backdropURL(seriesId: detail.id)) { image in
-                            image.resizable()
-                                .aspectRatio(contentMode: .fill)
-                                .blur(radius: 30)
-                                .overlay(Color.black.opacity(0.4))
-                        } placeholder: {
-                            Color.black
-                        }
-                        .ignoresSafeArea()
-                    } else {
-                        Color.black.ignoresSafeArea()
-                    }
+                    // Solid dark surface. The hero image sits in its own frame inside the
+                    // ScrollView, and its bottom gradient fades directly into this colour,
+                    // so scrolling past the hero reveals a clean background — no blur.
+                    Self.pageBackground.ignoresSafeArea()
 
                     ScrollView {
                         VStack(alignment: .leading, spacing: 0) {
@@ -138,14 +133,15 @@ struct SeriesDetailView: View {
                         .frame(width: geo.size.width, height: 620)
                 }
 
-                // Gradient overlays — bottom fade + left fade for text readability
+                // Bottom fade — ends in the page background colour so there's no visible
+                // seam between the hero and the episode list below.
                 VStack(spacing: 0) {
                     Color.clear
                     LinearGradient(
                         stops: [
-                            .init(color: .clear, location: 0),
-                            .init(color: .black.opacity(0.7), location: 0.4),
-                            .init(color: .black, location: 1.0)
+                            .init(color: Self.pageBackground.opacity(0), location: 0),
+                            .init(color: Self.pageBackground.opacity(0.75), location: 0.45),
+                            .init(color: Self.pageBackground, location: 1.0)
                         ],
                         startPoint: .top, endPoint: .bottom
                     )
@@ -153,10 +149,11 @@ struct SeriesDetailView: View {
                 }
                 .frame(height: 620)
 
-                // Left-side gradient for text contrast
+                // Left-side darkening for text contrast — keep it subtle so the artwork
+                // still reads as hero imagery, not a wash.
                 HStack(spacing: 0) {
                     LinearGradient(
-                        colors: [.black.opacity(0.6), .clear],
+                        colors: [.black.opacity(0.55), .clear],
                         startPoint: .leading, endPoint: .trailing
                     )
                     .frame(width: geo.size.width * 0.5)
@@ -446,12 +443,14 @@ private struct EpisodeRow: View {
         .padding(.vertical, 14)
         .padding(.horizontal, 28)
         .background {
-            if isFocused {
-                RoundedRectangle(cornerRadius: 20)
-                    .fill(.thinMaterial)
-                    .brightness(0.1)
-            }
+            RoundedRectangle(cornerRadius: 18)
+                .fill(isFocused ? Color(white: 0.16) : Color(white: 0.10))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18)
+                        .stroke(isFocused ? Color.white.opacity(0.35) : .clear, lineWidth: 1)
+                )
         }
+        .shadow(color: .black.opacity(isFocused ? 0.5 : 0), radius: isFocused ? 16 : 0, y: isFocused ? 8 : 0)
         .scaleEffect(isFocused ? 1.02 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
     }

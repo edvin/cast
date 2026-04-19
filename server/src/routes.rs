@@ -97,8 +97,35 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/episodes/watched", get(get_watched_episodes))
         .route("/api/episodes/{episode_id}", delete(delete_episode))
         .route("/api/hwenc", get(get_hwenc_info))
+        .route("/api/remux/failures", get(get_remux_failures))
+        .route("/api/remux/retry", post(retry_all_remux_failures))
+        .route("/api/remux/retry/{episode_id}", post(retry_one_remux_failure))
         .layer(cors)
         .with_state(state)
+}
+
+async fn get_remux_failures(State(state): State<Arc<AppState>>) -> Json<Vec<crate::db::RemuxFailure>> {
+    Json(state.db.list_remux_failures())
+}
+
+#[derive(Serialize)]
+struct RetryResponse {
+    cleared: bool,
+}
+
+async fn retry_all_remux_failures(State(state): State<Arc<AppState>>) -> Json<RetryResponse> {
+    state.db.retry_remux_failures(None);
+    state.log("Cleared remux failure flags — files will be retried on the next scan");
+    Json(RetryResponse { cleared: true })
+}
+
+async fn retry_one_remux_failure(
+    State(state): State<Arc<AppState>>,
+    Path(episode_id): Path<String>,
+) -> Json<RetryResponse> {
+    state.db.retry_remux_failures(Some(&episode_id));
+    state.log(&format!("Cleared remux failure for episode {episode_id}"));
+    Json(RetryResponse { cleared: true })
 }
 
 #[derive(Serialize)]
@@ -1662,6 +1689,10 @@ async fn remux_series(
         series.episodes.len()
     ));
 
+    // Manual trigger is also a "retry" signal — clear any abandoned-failure flags on
+    // this series so previously-given-up episodes get re-queued.
+    state.db.retry_remux_failures_for_series(&series_id);
+
     // Collect jobs synchronously, then kick off a single worker that processes them
     // sequentially. Reserving each stem in `state.remuxing` up front prevents the
     // background task, on-demand prepare and streaming paths from duplicating work.
@@ -2041,8 +2072,9 @@ async fn delete_episode(
         }
     }
 
-    // Clean up progress
+    // Clean up progress and any remux-failure record for this episode
     let _ = state.db.delete_progress(&episode_id);
+    state.db.retry_remux_failures(Some(&episode_id));
 
     // Rescan
     if let Ok(lib) = crate::library::Library::scan(&state.media_path) {

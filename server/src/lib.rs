@@ -339,22 +339,42 @@ pub async fn start_server(
         // Short grace period so startup log lines can land first, then begin work immediately.
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         remux_state.log("Background remux task started");
+        const MAX_REMUX_ATTEMPTS: i64 = 3;
         loop {
-            let files_to_remux = {
+            let files_to_remux: Vec<(PathBuf, PathBuf, String, String, String, String)> = {
                 let lib = remux_state.library.read().await;
                 let mut files = Vec::new();
+                let mut skipped_abandoned: u32 = 0;
                 for series in lib.series.values() {
                     for ep in &series.episodes {
                         let ep_path = remux_path.join(&ep.path);
-                        if routes::needs_remux(&ep_path) {
-                            let stem = ep_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-                            let mp4_path = ep_path.parent().unwrap().join(format!("{stem}.mp4"));
-                            let tmp_path = ep_path.parent().unwrap().join(format!("{stem}.mp4.tmp"));
-                            if !mp4_path.exists() && !tmp_path.exists() {
-                                files.push((ep_path, mp4_path, stem));
-                            }
+                        if !routes::needs_remux(&ep_path) {
+                            continue;
                         }
+                        let stem = ep_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                        let mp4_path = ep_path.parent().unwrap().join(format!("{stem}.mp4"));
+                        let tmp_path = ep_path.parent().unwrap().join(format!("{stem}.mp4.tmp"));
+                        if mp4_path.exists() || tmp_path.exists() {
+                            continue;
+                        }
+                        if remux_state.db.is_remux_abandoned(&ep.id) {
+                            skipped_abandoned += 1;
+                            continue;
+                        }
+                        files.push((
+                            ep_path,
+                            mp4_path,
+                            stem,
+                            ep.id.clone(),
+                            series.id.clone(),
+                            ep.path.clone(),
+                        ));
                     }
+                }
+                if skipped_abandoned > 0 {
+                    remux_state.log(&format!(
+                        "Skipping {skipped_abandoned} abandoned file(s) from previous failed attempts — use Retry to try again"
+                    ));
                 }
                 files
             };
@@ -367,7 +387,8 @@ pub async fn start_server(
             let total_files = files_to_remux.len();
             remux_state.log(&format!("{total_files} files need conversion"));
 
-            for (index, (source, target, stem)) in files_to_remux.iter().enumerate() {
+            for (index, (source, target, stem, episode_id, series_id, ep_rel_path)) in files_to_remux.iter().enumerate()
+            {
                 if target.exists() {
                     continue;
                 }
@@ -485,6 +506,7 @@ pub async fn start_server(
                                 total_files,
                                 target.file_name().unwrap().to_string_lossy()
                             ));
+                            remux_state.db.clear_remux_failure(episode_id);
                             let is_streaming = remux_state
                                 .active_streams
                                 .lock()
@@ -500,11 +522,23 @@ pub async fn start_server(
                     }
                     Ok(Ok(output)) => {
                         let stderr = String::from_utf8_lossy(&output.stderr);
-                        remux_state.log(&format!(
-                            "{action} failed: {}",
-                            stderr.lines().next().unwrap_or("unknown error")
-                        ));
+                        let first_err = stderr.lines().next().unwrap_or("unknown error").to_string();
+                        remux_state.log(&format!("{action} failed: {first_err}"));
                         let _ = std::fs::remove_file(&tmp_path);
+                        let state_after = remux_state.db.record_remux_failure(
+                            episode_id,
+                            series_id,
+                            ep_rel_path,
+                            &first_err,
+                            MAX_REMUX_ATTEMPTS,
+                        );
+                        if state_after.given_up {
+                            remux_state.log(&format!(
+                                "Giving up on {} after {} attempts — use Retry to try again",
+                                source.file_name().unwrap().to_string_lossy(),
+                                state_after.attempts
+                            ));
+                        }
                     }
                     _ => {
                         if let Ok(mut set) = remux_state.remuxing.lock() {

@@ -349,6 +349,7 @@
     <div class="tabs">
         <div class="tab active" data-page="library">Library</div>
         <div class="tab" data-page="logs">Logs <span class="tab-badge hidden" id="logBadge">0</span></div>
+        <div class="tab" data-page="failures">Failures <span class="tab-badge hidden" id="failureBadge">0</span></div>
         <div class="tab" data-page="settings">Settings</div>
     </div>
 
@@ -373,6 +374,35 @@
                 <div class="stat-card"><div class="label">Media Path</div><div class="value" id="statPath" style="font-size: 13px; word-break: break-all;">—</div></div>
             </div>
             <div class="log-container" id="logContainer"></div>
+        </div>
+
+        <!-- Failures page -->
+        <div class="page" id="page-failures">
+            <div id="failuresHeader" style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
+                <div style="flex:1;">
+                    <div style="font-size:16px; font-weight:600;">Remux failures</div>
+                    <div style="font-size:12px; color:#888;" id="failuresSummary">No failures.</div>
+                </div>
+                <button class="action-btn" onclick="retryAllFailures(this)" id="retryAllBtn" style="display:none;">↻ Retry All</button>
+            </div>
+            <div id="failuresTableContainer">
+                <div id="failuresEmpty" style="text-align:center; padding:60px 20px; color:#888;">
+                    <div style="font-size: 40px;">✓</div>
+                    <div style="margin-top:8px;">No remux failures. Everything's transcoding cleanly.</div>
+                </div>
+                <table id="failuresTable" style="display:none; width:100%; border-collapse:collapse;">
+                    <thead>
+                        <tr style="border-bottom:1px solid #333; text-align:left;">
+                            <th style="padding:8px; font-size:12px; color:#888; font-weight:500;">File</th>
+                            <th style="padding:8px; font-size:12px; color:#888; font-weight:500;">Attempts</th>
+                            <th style="padding:8px; font-size:12px; color:#888; font-weight:500;">Last error</th>
+                            <th style="padding:8px; font-size:12px; color:#888; font-weight:500;">When</th>
+                            <th style="padding:8px; font-size:12px; color:#888; font-weight:500;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="failuresTableBody"></tbody>
+                </table>
+            </div>
         </div>
 
         <!-- Settings page -->
@@ -478,8 +508,128 @@
                 // Always re-sync logs from the server buffer when the user opens the tab,
                 // so anything emitted before `listen` attached isn't lost.
                 if (tab.dataset.page === 'logs') loadLogs();
+                if (tab.dataset.page === 'failures') loadFailures();
             });
         });
+
+        // --- Remux failures ---
+        async function loadFailures() {
+            try {
+                const resp = await fetch(apiUrl('/api/remux/failures'));
+                if (!resp.ok) throw new Error(`status ${resp.status}`);
+                const failures = await resp.json();
+                renderFailures(failures);
+                updateFailureBadge(failures.length);
+            } catch (e) {
+                // Server might not be up yet
+            }
+        }
+
+        function updateFailureBadge(count) {
+            const badge = document.getElementById('failureBadge');
+            if (count > 0) {
+                badge.textContent = count > 99 ? '99+' : count;
+                badge.classList.remove('hidden');
+            } else {
+                badge.classList.add('hidden');
+            }
+        }
+
+        function renderFailures(failures) {
+            const tbody = document.getElementById('failuresTableBody');
+            const table = document.getElementById('failuresTable');
+            const empty = document.getElementById('failuresEmpty');
+            const summary = document.getElementById('failuresSummary');
+            const retryAllBtn = document.getElementById('retryAllBtn');
+
+            if (!failures || failures.length === 0) {
+                table.style.display = 'none';
+                empty.style.display = 'block';
+                summary.textContent = 'No failures.';
+                retryAllBtn.style.display = 'none';
+                return;
+            }
+
+            const abandoned = failures.filter(f => f.given_up).length;
+            const retrying = failures.length - abandoned;
+            summary.textContent = `${failures.length} file${failures.length !== 1 ? 's' : ''} failed to remux — ${abandoned} abandoned, ${retrying} still retrying.`;
+
+            empty.style.display = 'none';
+            table.style.display = 'table';
+            retryAllBtn.style.display = 'inline-block';
+
+            tbody.innerHTML = failures.map(f => {
+                const statusColor = f.given_up ? '#ff3b30' : '#ff9f0a';
+                const statusIcon = f.given_up ? '⛔' : '↻';
+                const when = new Date(f.last_attempt_at + 'Z').toLocaleString();
+                return `
+                    <tr style="border-bottom:1px solid #222;" data-ep="${esc(f.episode_id)}">
+                        <td style="padding:10px 8px; font-size:13px;">
+                            <div style="font-family: monospace; color:#ccc;">${esc(f.path)}</div>
+                        </td>
+                        <td style="padding:10px 8px; color:${statusColor};">
+                            ${statusIcon} ${f.attempts}
+                        </td>
+                        <td style="padding:10px 8px; font-size:12px; color:#bbb; max-width:400px; word-break:break-word;">
+                            ${esc(f.last_error || '')}
+                        </td>
+                        <td style="padding:10px 8px; font-size:12px; color:#888; white-space:nowrap;">${esc(when)}</td>
+                        <td style="padding:10px 8px; white-space:nowrap;">
+                            <button class="action-btn-sm" onclick="retryOneFailure('${esc(f.episode_id)}', this)">↻ Retry</button>
+                            <button class="action-btn-sm danger" onclick="deleteFailureEpisode('${esc(f.episode_id)}', this)">🗑 Delete</button>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        async function retryAllFailures(btn) {
+            const ok = await showConfirm('Retry all abandoned remuxes?', 'This will clear the failure flags so the background scanner picks them up on its next pass.', 'Retry All');
+            if (!ok) return;
+            btn.disabled = true;
+            try {
+                await fetch(apiUrl('/api/remux/retry'), { method: 'POST' });
+                showToast('Failure flags cleared', 'Files will be retried on the next scan cycle.', 'success');
+                await loadFailures();
+            } catch (e) {
+                showToast('Retry failed', String(e), 'error');
+            }
+            btn.disabled = false;
+        }
+
+        async function retryOneFailure(episodeId, btn) {
+            btn.disabled = true;
+            try {
+                await fetch(apiUrl('/api/remux/retry/' + encodeURIComponent(episodeId)), { method: 'POST' });
+                await loadFailures();
+            } catch (e) {
+                showToast('Retry failed', String(e), 'error');
+                btn.disabled = false;
+            }
+        }
+
+        async function deleteFailureEpisode(episodeId, btn) {
+            const ok = await showConfirm('Delete this episode?', 'The source file, any half-written .tmp, subtitles and watch progress will all be removed.', 'Delete');
+            if (!ok) return;
+            btn.disabled = true;
+            try {
+                await fetch(apiUrl('/api/episodes/' + encodeURIComponent(episodeId)), { method: 'DELETE' });
+                await loadFailures();
+                showToast('Episode deleted', '', 'success');
+            } catch (e) {
+                showToast('Delete failed', String(e), 'error');
+                btn.disabled = false;
+            }
+        }
+
+        // Poll failure count periodically so the badge is up to date without needing
+        // the user to open the Failures tab.
+        setInterval(() => {
+            fetch(apiUrl('/api/remux/failures'))
+                .then(r => r.ok ? r.json() : null)
+                .then(f => { if (f) updateFailureBadge(f.length); })
+                .catch(() => {});
+        }, 15000);
 
         // --- Logs ---
         const logContainer = document.getElementById('logContainer');

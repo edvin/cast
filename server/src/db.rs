@@ -88,6 +88,16 @@ impl Database {
                 credits_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL DEFAULT (datetime('now')),
                 PRIMARY KEY (series_id, season_number, episode_number)
+            );
+
+            CREATE TABLE IF NOT EXISTS remux_failures (
+                episode_id TEXT PRIMARY KEY,
+                series_id TEXT NOT NULL,
+                path TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                last_attempt_at TEXT NOT NULL DEFAULT (datetime('now')),
+                given_up INTEGER NOT NULL DEFAULT 0
             );",
         )?;
 
@@ -383,8 +393,141 @@ impl Database {
         let _ = conn.execute("DELETE FROM series_metadata WHERE series_id = ?1", params![series_id]);
         let _ = conn.execute("DELETE FROM episode_metadata WHERE series_id = ?1", params![series_id]);
         let _ = conn.execute("DELETE FROM episode_credits WHERE series_id = ?1", params![series_id]);
+        let _ = conn.execute("DELETE FROM remux_failures WHERE series_id = ?1", params![series_id]);
     }
 
+    // --- Remux failure tracking ---
+
+    /// Record a failed remux attempt, incrementing the attempt counter and flipping
+    /// `given_up` once it crosses the threshold. Returns the new state so the caller
+    /// can log "Giving up..." exactly once.
+    pub fn record_remux_failure(
+        &self,
+        episode_id: &str,
+        series_id: &str,
+        path: &str,
+        error: &str,
+        max_attempts: i64,
+    ) -> RemuxFailureState {
+        let conn = self.conn.lock().unwrap();
+        // UPSERT: insert with attempts=1 or increment existing row.
+        let _ = conn.execute(
+            "INSERT INTO remux_failures (episode_id, series_id, path, attempts, last_error, last_attempt_at, given_up)
+             VALUES (?1, ?2, ?3, 1, ?4, datetime('now'), 0)
+             ON CONFLICT(episode_id) DO UPDATE SET
+                 series_id = excluded.series_id,
+                 path = excluded.path,
+                 attempts = attempts + 1,
+                 last_error = excluded.last_error,
+                 last_attempt_at = excluded.last_attempt_at",
+            params![episode_id, series_id, path, error],
+        );
+        let attempts: i64 = conn
+            .query_row(
+                "SELECT attempts FROM remux_failures WHERE episode_id = ?1",
+                params![episode_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let crossing_threshold = attempts >= max_attempts;
+        if crossing_threshold {
+            let _ = conn.execute(
+                "UPDATE remux_failures SET given_up = 1 WHERE episode_id = ?1",
+                params![episode_id],
+            );
+        }
+        RemuxFailureState {
+            attempts: attempts as u32,
+            given_up: crossing_threshold,
+        }
+    }
+
+    /// Clear the failure record for an episode — call this on successful remux so
+    /// the file doesn't stay flagged.
+    pub fn clear_remux_failure(&self, episode_id: &str) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute("DELETE FROM remux_failures WHERE episode_id = ?1", params![episode_id]);
+    }
+
+    /// Is this episode marked as abandoned?
+    pub fn is_remux_abandoned(&self, episode_id: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT given_up FROM remux_failures WHERE episode_id = ?1",
+            params![episode_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|v| v != 0)
+        .unwrap_or(false)
+    }
+
+    /// List all remux failures (abandoned first, then recent).
+    pub fn list_remux_failures(&self) -> Vec<RemuxFailure> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT episode_id, series_id, path, attempts, last_error, last_attempt_at, given_up
+             FROM remux_failures
+             ORDER BY given_up DESC, last_attempt_at DESC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let iter = stmt.query_map([], |row| {
+            Ok(RemuxFailure {
+                episode_id: row.get(0)?,
+                series_id: row.get(1)?,
+                path: row.get(2)?,
+                attempts: row.get::<_, i64>(3)? as u32,
+                last_error: row.get(4)?,
+                last_attempt_at: row.get(5)?,
+                given_up: row.get::<_, i64>(6)? != 0,
+            })
+        });
+        match iter {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Clear the given_up flag on all (or a specific episode) so the scanner retries.
+    pub fn retry_remux_failures(&self, episode_id: Option<&str>) {
+        let conn = self.conn.lock().unwrap();
+        match episode_id {
+            Some(id) => {
+                let _ = conn.execute("DELETE FROM remux_failures WHERE episode_id = ?1", params![id]);
+            }
+            None => {
+                let _ = conn.execute("DELETE FROM remux_failures", []);
+            }
+        }
+    }
+
+    /// Clear failures for a whole series — used when the user manually triggers
+    /// "Remux All" on a series, so any abandoned files get re-queued.
+    pub fn retry_remux_failures_for_series(&self, series_id: &str) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute("DELETE FROM remux_failures WHERE series_id = ?1", params![series_id]);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RemuxFailureState {
+    pub attempts: u32,
+    pub given_up: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RemuxFailure {
+    pub episode_id: String,
+    pub series_id: String,
+    pub path: String,
+    pub attempts: u32,
+    pub last_error: Option<String>,
+    pub last_attempt_at: String,
+    pub given_up: bool,
+}
+
+impl Database {
     pub fn delete_progress(&self, episode_id: &str) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM watch_progress WHERE episode_id = ?1", params![episode_id])?;

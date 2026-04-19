@@ -1551,10 +1551,20 @@ async fn prepare_episode(
         }));
     }
 
-    // Currently remuxing? Report progress based on file size ratio
+    // Currently remuxing? Report progress based on file size ratio.
+    // A .tmp file only counts as "in progress" if something on this server is actually
+    // working on it (state.remuxing contains the stem). Otherwise it's an orphan from a
+    // prior crashed run — clean it up and fall through to kick off a fresh remux.
     let is_remuxing = state.remuxing.lock().map(|s| s.contains(&stem)).unwrap_or(false);
+    if !is_remuxing && tmp_path.exists() {
+        state.log(&format!(
+            "Found orphaned {} with no active remux — cleaning up",
+            tmp_path.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = std::fs::remove_file(&tmp_path);
+    }
 
-    if is_remuxing || tmp_path.exists() {
+    if is_remuxing {
         let progress = if let (Ok(tmp_meta), Ok(src_meta)) = (tmp_path.metadata(), file_path.metadata()) {
             let src_size = src_meta.len();
             let tmp_size = tmp_meta.len();
@@ -1717,9 +1727,23 @@ async fn remux_series(
             continue;
         }
         let tmp_path = parent.join(format!("{stem}.mp4.tmp"));
+        // .tmp only counts as "running" if this server process has the stem reserved.
+        // Otherwise it's an orphan — a manual Remux All is the user's "please retry", so
+        // sweep it aside and queue fresh.
         if tmp_path.exists() {
-            already_running += 1;
-            continue;
+            let active = state.remuxing.lock().map(|s| s.contains(&stem)).unwrap_or(false);
+            if active {
+                already_running += 1;
+                continue;
+            }
+            if std::fs::remove_file(&tmp_path).is_err() {
+                already_running += 1;
+                continue;
+            }
+            state.log(&format!(
+                "Cleaned up orphaned {}",
+                tmp_path.file_name().unwrap().to_string_lossy()
+            ));
         }
         let reserved = {
             let mut set = match state.remuxing.lock() {

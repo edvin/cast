@@ -345,6 +345,7 @@ pub async fn start_server(
                 let lib = remux_state.library.read().await;
                 let mut files = Vec::new();
                 let mut skipped_abandoned: u32 = 0;
+                let mut cleaned_orphans: u32 = 0;
                 for series in lib.series.values() {
                     for ep in &series.episodes {
                         let ep_path = remux_path.join(&ep.path);
@@ -352,10 +353,35 @@ pub async fn start_server(
                             continue;
                         }
                         let stem = ep_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-                        let mp4_path = ep_path.parent().unwrap().join(format!("{stem}.mp4"));
-                        let tmp_path = ep_path.parent().unwrap().join(format!("{stem}.mp4.tmp"));
-                        if mp4_path.exists() || tmp_path.exists() {
+                        let parent = match ep_path.parent() {
+                            Some(p) => p,
+                            None => continue,
+                        };
+                        let mp4_path = parent.join(format!("{stem}.mp4"));
+                        let tmp_path = parent.join(format!("{stem}.mp4.tmp"));
+                        if mp4_path.exists() {
                             continue;
+                        }
+                        if tmp_path.exists() {
+                            // Is anything actually remuxing this right now? state.remuxing is
+                            // process-local, so on a fresh start it's always empty — any .tmp
+                            // sitting around is an orphan from a prior crash/shutdown.
+                            let active = remux_state.remuxing.lock().map(|s| s.contains(&stem)).unwrap_or(false);
+                            if active {
+                                continue;
+                            }
+                            match std::fs::remove_file(&tmp_path) {
+                                Ok(()) => {
+                                    cleaned_orphans += 1;
+                                }
+                                Err(e) => {
+                                    remux_state.log(&format!(
+                                        "Could not remove orphaned {}: {e}",
+                                        tmp_path.file_name().unwrap().to_string_lossy()
+                                    ));
+                                    continue;
+                                }
+                            }
                         }
                         if remux_state.db.is_remux_abandoned(&ep.id) {
                             skipped_abandoned += 1;
@@ -370,6 +396,11 @@ pub async fn start_server(
                             ep.path.clone(),
                         ));
                     }
+                }
+                if cleaned_orphans > 0 {
+                    remux_state.log(&format!(
+                        "Cleaned up {cleaned_orphans} orphaned .mp4.tmp file(s) from a previous run — re-queueing them"
+                    ));
                 }
                 if skipped_abandoned > 0 {
                     remux_state.log(&format!(

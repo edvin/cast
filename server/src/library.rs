@@ -360,12 +360,43 @@ impl Library {
                 }
             };
 
-            // Collect episodes (video files in the series directory)
-            let mut video_files: Vec<_> = std::fs::read_dir(&series_path)?
+            // Collect episodes (video files in the series directory). When both an
+            // Apple-native container (mp4/m4v/mov) AND a container that needs remuxing
+            // (mkv/avi/webm/flv) share the same file stem, we only keep the native one.
+            // That way a successfully transcoded episode where the original MKV wasn't
+            // deleted (permissions, file lock) doesn't show as a duplicate in the UI.
+            let all_videos: Vec<_> = std::fs::read_dir(&series_path)?
                 .filter_map(|e| e.ok())
                 .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false) && is_video(&e.path()))
                 .collect();
 
+            let mut best_by_stem: std::collections::HashMap<String, (std::fs::DirEntry, u8)> =
+                std::collections::HashMap::new();
+            for entry in all_videos {
+                let path = entry.path();
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                // 0 = prefer (Apple-native), 1 = keep only if nothing better
+                let prio: u8 = match path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|s| s.to_lowercase())
+                    .as_deref()
+                {
+                    Some("mp4") | Some("m4v") | Some("mov") => 0,
+                    _ => 1,
+                };
+                match best_by_stem.get(&stem) {
+                    Some((_, existing)) if *existing <= prio => continue,
+                    _ => {
+                        best_by_stem.insert(stem, (entry, prio));
+                    }
+                }
+            }
+            let mut video_files: Vec<_> = best_by_stem.into_values().map(|(e, _)| e).collect();
             video_files.sort_by_key(|e| e.file_name());
 
             // Skip folders that aren't series (no videos, no art, no tmdb.txt)
@@ -624,13 +655,37 @@ mod tests {
         let dir = make_media_dir();
         let series_dir = dir.path().join("Show");
         fs::create_dir(&series_dir).unwrap();
-        for ext in &["mp4", "m4v", "mov", "mkv", "avi", "webm"] {
-            fs::write(series_dir.join(format!("file.{}", ext)), b"data").unwrap();
+        // Use distinct stems so the stem-based dedup doesn't fold them together.
+        for (i, ext) in ["mp4", "m4v", "mov", "mkv", "avi", "webm"].iter().enumerate() {
+            fs::write(series_dir.join(format!("file{i}.{ext}")), b"data").unwrap();
         }
 
         let lib = Library::scan(dir.path()).unwrap();
         let series = lib.series.values().next().unwrap();
         assert_eq!(series.episodes.len(), 6);
+    }
+
+    #[test]
+    fn prefers_mp4_sibling_over_mkv_with_same_stem() {
+        let dir = make_media_dir();
+        let series_dir = dir.path().join("Show");
+        fs::create_dir(&series_dir).unwrap();
+        // Both files exist side by side (successful remux that didn't delete the original)
+        fs::write(series_dir.join("S01E01.mkv"), b"original").unwrap();
+        fs::write(series_dir.join("S01E01.mp4"), b"transcoded").unwrap();
+        // An unrelated file with a different stem — should still appear
+        fs::write(series_dir.join("S01E02.mkv"), b"other").unwrap();
+
+        let lib = Library::scan(dir.path()).unwrap();
+        let series = lib.series.values().next().unwrap();
+        assert_eq!(series.episodes.len(), 2);
+        // The S01E01 entry must point at the .mp4, not the .mkv
+        let ep1 = series
+            .episodes
+            .iter()
+            .find(|e| e.filename.starts_with("S01E01"))
+            .unwrap();
+        assert_eq!(ep1.filename, "S01E01.mp4");
     }
 
     #[test]

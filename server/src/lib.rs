@@ -359,8 +359,8 @@ pub async fn start_server(
                     source.file_name().unwrap().to_string_lossy()
                 ));
 
-                // Heartbeat: while ffmpeg is running, periodically log the .tmp file size so
-                // users can see progress for long transcodes instead of silence.
+                // Heartbeat on a dedicated OS thread so it keeps ticking even if the async
+                // runtime is busy (TMDB fetches, IPC, etc.). Reports wall-clock elapsed.
                 let source_size = std::fs::metadata(source).map(|m| m.len()).unwrap_or(0);
                 let hb_tmp = tmp_path.clone();
                 let hb_state = remux_state.clone();
@@ -370,17 +370,26 @@ pub async fn start_server(
                     total_files,
                     source.file_name().unwrap().to_string_lossy()
                 );
-                let heartbeat = tokio::spawn(async move {
-                    let mut ticks: u32 = 0;
-                    loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                        ticks += 1;
+                let hb_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let hb_stop_flag = hb_stop.clone();
+                let heartbeat = std::thread::spawn(move || {
+                    let started = std::time::Instant::now();
+                    // Poll the stop flag in small increments so abort is responsive, but
+                    // only log every 30s.
+                    let mut next_report = std::time::Duration::from_secs(30);
+                    while !hb_stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        if started.elapsed() < next_report {
+                            continue;
+                        }
+                        next_report += std::time::Duration::from_secs(30);
+                        let elapsed_secs = started.elapsed().as_secs();
                         let tmp_size = std::fs::metadata(&hb_tmp).map(|m| m.len()).unwrap_or(0);
                         if source_size > 0 {
                             let pct = ((tmp_size as f64 / source_size as f64) * 100.0).min(99.0) as u32;
-                            hb_state.log(&format!("  {hb_label} — {pct}% ({}s elapsed)", ticks * 30));
+                            hb_state.log(&format!("  {hb_label} — {pct}% ({elapsed_secs}s elapsed)"));
                         } else {
-                            hb_state.log(&format!("  {hb_label} — {}s elapsed", ticks * 30));
+                            hb_state.log(&format!("  {hb_label} — {elapsed_secs}s elapsed"));
                         }
                     }
                 });
@@ -428,7 +437,8 @@ pub async fn start_server(
                         .output()
                 })
                 .await;
-                heartbeat.abort();
+                hb_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                let _ = heartbeat.join();
 
                 match result {
                     Ok(Ok(output)) if output.status.success() => {

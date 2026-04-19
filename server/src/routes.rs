@@ -605,11 +605,22 @@ pub type EncoderProbe = (&'static str, &'static str, Result<(), String>);
 /// *selection* (which probed encoder we actually use) can differ per `start_server` call
 /// depending on the ServerConfig override.
 static PROBED_ENCODERS: std::sync::LazyLock<Vec<EncoderProbe>> = std::sync::LazyLock::new(|| {
+    // `-pix_fmt yuv420p` is critical: most files that trigger transcoding are 10-bit
+    // HEVC / VP9 / AV1 sources, and h264_nvenc / qsv / amf are 8-bit-only. Without
+    // this flag ffmpeg tries to encode 10-bit H.264 and the HW encoder aborts with
+    // "10 bit encode not supported". yuv420p is also Apple TV's preferred playback
+    // format. h264_qsv wants nv12 specifically.
     const CANDIDATES: &[(&str, &str)] = &[
-        ("h264_nvenc", "-preset p4 -rc vbr -cq 23 -b:v 0"),
-        ("h264_qsv", "-preset medium -global_quality 23 -look_ahead 1"),
-        ("h264_amf", "-quality balanced -rc cqp -qp_i 22 -qp_p 22"),
-        ("h264_videotoolbox", "-q:v 55"),
+        ("h264_nvenc", "-pix_fmt yuv420p -preset p4 -rc vbr -cq 23 -b:v 0"),
+        (
+            "h264_qsv",
+            "-pix_fmt nv12 -preset medium -global_quality 23 -look_ahead 1",
+        ),
+        (
+            "h264_amf",
+            "-pix_fmt yuv420p -quality balanced -rc cqp -qp_i 22 -qp_p 22",
+        ),
+        ("h264_videotoolbox", "-pix_fmt yuv420p -q:v 55"),
     ];
     CANDIDATES
         .iter()
@@ -636,7 +647,7 @@ pub fn resolve_encoder(override_value: Option<&str>) -> ((&'static str, &'static
             (enc, format!("Transcoding encoder: {} (auto)", label_for(enc.0)))
         }
         Some("software") | Some("libx264") => (
-            ("libx264", "-crf 18 -preset fast"),
+            ("libx264", "-pix_fmt yuv420p -crf 18 -preset fast"),
             "Transcoding encoder: software (libx264) — explicitly requested".to_string(),
         ),
         Some(other) => {
@@ -678,7 +689,7 @@ fn pick_first_ok(probes: &[EncoderProbe]) -> (&'static str, &'static str) {
             return (*name, *args);
         }
     }
-    ("libx264", "-crf 18 -preset fast")
+    ("libx264", "-pix_fmt yuv420p -crf 18 -preset fast")
 }
 
 /// Probe whether an encoder is usable by doing a tiny test encode. `-encoders` only
@@ -2098,7 +2109,7 @@ mod tests {
             remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             generating_thumbs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
-            transcode_encoder: ("libx264", "-crf 18 -preset fast"),
+            transcode_encoder: ("libx264", "-pix_fmt yuv420p -crf 18 -preset fast"),
             encoder_label: "software (libx264)".to_string(),
             log: None,
         });
@@ -2406,7 +2417,7 @@ mod tests {
             remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             generating_thumbs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
-            transcode_encoder: ("libx264", "-crf 18 -preset fast"),
+            transcode_encoder: ("libx264", "-pix_fmt yuv420p -crf 18 -preset fast"),
             encoder_label: "software (libx264)".to_string(),
             log: None,
         });
@@ -2475,7 +2486,7 @@ mod tests {
             remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             generating_thumbs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
-            transcode_encoder: ("libx264", "-crf 18 -preset fast"),
+            transcode_encoder: ("libx264", "-pix_fmt yuv420p -crf 18 -preset fast"),
             encoder_label: "software (libx264)".to_string(),
             log: None,
         });
@@ -2698,7 +2709,7 @@ mod tests {
             remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             generating_thumbs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
-            transcode_encoder: ("libx264", "-crf 18 -preset fast"),
+            transcode_encoder: ("libx264", "-pix_fmt yuv420p -crf 18 -preset fast"),
             encoder_label: "software (libx264)".to_string(),
             log: None,
         });

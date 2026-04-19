@@ -7,9 +7,9 @@ import Foundation
 final class ProgressReporter {
     typealias Updater = @Sendable (_ position: Double, _ duration: Double) async -> Void
 
-    private var timer: Timer?
-    private var updater: Updater?
-    private var inflightTasks: [Task<Void, Never>] = []
+    @ObservationIgnored private var timer: Timer?
+    @ObservationIgnored private var updater: Updater?
+    @ObservationIgnored private var inflightTasks: [Task<Void, Never>] = []
 
     func start(
         updater: @escaping Updater,

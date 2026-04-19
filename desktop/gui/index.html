@@ -422,7 +422,7 @@
                 <thead>
                     <tr style="border-bottom:1px solid #333; text-align:left;">
                         <th style="padding:8px; font-size:12px; color:#888; font-weight:500;">Kind</th>
-                        <th style="padding:8px; font-size:12px; color:#888; font-weight:500;">Content ID</th>
+                        <th style="padding:8px; font-size:12px; color:#888; font-weight:500;">Title / Path</th>
                         <th style="padding:8px; font-size:12px; color:#888; font-weight:500;">Attempts</th>
                         <th style="padding:8px; font-size:12px; color:#888; font-weight:500;">Last error</th>
                         <th style="padding:8px; font-size:12px; color:#888; font-weight:500;">When</th>
@@ -588,10 +588,16 @@
                 const color = f.given_up ? '#ff3b30' : '#ff9f0a';
                 const icon = f.given_up ? '⛔' : '↻';
                 const when = new Date(f.last_attempt_at + 'Z').toLocaleString();
+                // Prefer the stored title; fall back to path; fall back to id.
+                const title = f.title || f.path || f.content_id;
+                const subtitle = (f.path && f.path !== title) ? f.path : '';
                 return `
                     <tr style="border-bottom:1px solid #222;">
                         <td style="padding:10px 8px; text-transform:capitalize;">${esc(f.kind)}</td>
-                        <td style="padding:10px 8px; font-family:monospace; font-size:12px; color:#ccc;">${esc(f.content_id)}</td>
+                        <td style="padding:10px 8px; max-width:400px;">
+                            <div style="font-size:13px; color:#ddd;">${esc(title)}</div>
+                            ${subtitle ? `<div style="font-size:11px; color:#888; font-family:monospace;">${esc(subtitle)}</div>` : ''}
+                        </td>
                         <td style="padding:10px 8px; color:${color};">${icon} ${f.attempts}</td>
                         <td style="padding:10px 8px; font-size:12px; color:#bbb;">${esc(f.last_error || '')}</td>
                         <td style="padding:10px 8px; font-size:12px; color:#888; white-space:nowrap;">${esc(when)}</td>

@@ -59,6 +59,16 @@ impl Database {
         let db_path = media_path.join("cast.db");
         let conn = Connection::open(db_path)?;
 
+        // Best-effort idempotent migrations for columns added to existing tables.
+        // ALTER TABLE ADD COLUMN only succeeds once; ignore "duplicate column" errors
+        // so reopening a v0.4.17 database still works.
+        for stmt in [
+            "ALTER TABLE tmdb_lookup_attempts ADD COLUMN title TEXT",
+            "ALTER TABLE tmdb_lookup_attempts ADD COLUMN path TEXT",
+        ] {
+            let _ = conn.execute(stmt, []);
+        }
+
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS watch_progress (
                 episode_id TEXT PRIMARY KEY,
@@ -129,6 +139,8 @@ impl Database {
             CREATE TABLE IF NOT EXISTS tmdb_lookup_attempts (
                 content_id TEXT PRIMARY KEY,
                 kind TEXT NOT NULL,
+                title TEXT,
+                path TEXT,
                 attempts INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT,
                 last_attempt_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -506,17 +518,27 @@ impl Database {
 
     /// Record a failed TMDB lookup attempt and flip `given_up` once the attempt count
     /// crosses `max_attempts`. Kind is "series" or "movie".
-    pub fn record_tmdb_failure(&self, content_id: &str, kind: &str, error: &str, max_attempts: i64) -> TmdbLookupState {
+    pub fn record_tmdb_failure(
+        &self,
+        content_id: &str,
+        kind: &str,
+        title: &str,
+        path: &str,
+        error: &str,
+        max_attempts: i64,
+    ) -> TmdbLookupState {
         let conn = self.conn.lock().unwrap();
         let _ = conn.execute(
-            "INSERT INTO tmdb_lookup_attempts (content_id, kind, attempts, last_error, last_attempt_at, given_up)
-             VALUES (?1, ?2, 1, ?3, datetime('now'), 0)
+            "INSERT INTO tmdb_lookup_attempts (content_id, kind, title, path, attempts, last_error, last_attempt_at, given_up)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5, datetime('now'), 0)
              ON CONFLICT(content_id) DO UPDATE SET
                  kind = excluded.kind,
+                 title = excluded.title,
+                 path = excluded.path,
                  attempts = attempts + 1,
                  last_error = excluded.last_error,
                  last_attempt_at = excluded.last_attempt_at",
-            params![content_id, kind, error],
+            params![content_id, kind, title, path, error],
         );
         let attempts: i64 = conn
             .query_row(
@@ -567,7 +589,7 @@ impl Database {
     pub fn list_tmdb_failures(&self) -> Vec<TmdbLookupFailure> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = match conn.prepare(
-            "SELECT content_id, kind, attempts, last_error, last_attempt_at, given_up
+            "SELECT content_id, kind, title, path, attempts, last_error, last_attempt_at, given_up
              FROM tmdb_lookup_attempts ORDER BY given_up DESC, last_attempt_at DESC",
         ) {
             Ok(s) => s,
@@ -577,15 +599,53 @@ impl Database {
             Ok(TmdbLookupFailure {
                 content_id: row.get(0)?,
                 kind: row.get(1)?,
-                attempts: row.get::<_, i64>(2)? as u32,
-                last_error: row.get(3)?,
-                last_attempt_at: row.get(4)?,
-                given_up: row.get::<_, i64>(5)? != 0,
+                title: row.get(2)?,
+                path: row.get(3)?,
+                attempts: row.get::<_, i64>(4)? as u32,
+                last_error: row.get(5)?,
+                last_attempt_at: row.get(6)?,
+                given_up: row.get::<_, i64>(7)? != 0,
             })
         });
         match iter {
             Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
             Err(_) => Vec::new(),
+        }
+    }
+
+    /// Drop any failure rows whose content_id is no longer present in the live library.
+    /// Called from the periodic rescan so entries don't linger after the user removes a
+    /// file or folder from disk.
+    pub fn prune_orphan_failures(&self, known_ids: &std::collections::HashSet<String>) {
+        let conn = self.conn.lock().unwrap();
+
+        fn collect_ids(conn: &Connection, sql: &str) -> Vec<String> {
+            let mut stmt = match conn.prepare(sql) {
+                Ok(s) => s,
+                Err(_) => return Vec::new(),
+            };
+            stmt.query_map([], |row| row.get::<_, String>(0))
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default()
+        }
+
+        let tmdb_ids = collect_ids(&conn, "SELECT content_id FROM tmdb_lookup_attempts");
+        for id in tmdb_ids {
+            if !known_ids.contains(&id) {
+                let _ = conn.execute("DELETE FROM tmdb_lookup_attempts WHERE content_id = ?1", params![id]);
+            }
+        }
+        let remux_ids = collect_ids(&conn, "SELECT episode_id FROM remux_failures");
+        for id in remux_ids {
+            if !known_ids.contains(&id) {
+                let _ = conn.execute("DELETE FROM remux_failures WHERE episode_id = ?1", params![id]);
+            }
+        }
+        let artwork_ids = collect_ids(&conn, "SELECT DISTINCT content_id FROM artwork");
+        for id in artwork_ids {
+            if !known_ids.contains(&id) {
+                let _ = conn.execute("DELETE FROM artwork WHERE content_id = ?1", params![id]);
+            }
         }
     }
 
@@ -648,6 +708,8 @@ pub struct TmdbLookupState {
 pub struct TmdbLookupFailure {
     pub content_id: String,
     pub kind: String,
+    pub title: Option<String>,
+    pub path: Option<String>,
     pub attempts: u32,
     pub last_error: Option<String>,
     pub last_attempt_at: String,

@@ -730,7 +730,14 @@ pub async fn fetch_all_movies_metadata(
                 }
             }
             Ok(None) => {
-                let state = db.record_tmdb_failure(&entry.movie_id, "movie", "no TMDB match", MAX_TMDB_LOOKUP_ATTEMPTS);
+                let state = db.record_tmdb_failure(
+                    &entry.movie_id,
+                    "movie",
+                    &entry.title,
+                    &entry.video_path.to_string_lossy(),
+                    "no TMDB match",
+                    MAX_TMDB_LOOKUP_ATTEMPTS,
+                );
                 if state.given_up {
                     let m = format!(
                         "Giving up on '{}' after {} TMDB lookup attempts — add tmdb.txt with the movie ID or click Retry",
@@ -748,7 +755,14 @@ pub async fn fetch_all_movies_metadata(
                 }
             }
             Err(e) => {
-                let state = db.record_tmdb_failure(&entry.movie_id, "movie", &format!("{e}"), MAX_TMDB_LOOKUP_ATTEMPTS);
+                let state = db.record_tmdb_failure(
+                    &entry.movie_id,
+                    "movie",
+                    &entry.title,
+                    &entry.video_path.to_string_lossy(),
+                    &format!("{e}"),
+                    MAX_TMDB_LOOKUP_ATTEMPTS,
+                );
                 let m = format!(
                     "TMDB movie search failed for '{}' (attempt {}/{MAX_TMDB_LOOKUP_ATTEMPTS}): {e}",
                     entry.title, state.attempts
@@ -929,7 +943,8 @@ pub async fn fetch_all_metadata(
             }
             Ok(None) => {
                 let reason = "no TMDB match";
-                let state = db.record_tmdb_failure(&series_id, "series", reason, MAX_TMDB_LOOKUP_ATTEMPTS);
+                let state =
+                    db.record_tmdb_failure(&series_id, "series", &title, &title, reason, MAX_TMDB_LOOKUP_ATTEMPTS);
                 if state.given_up {
                     let msg = format!("Giving up on '{title}' after {} TMDB lookup attempts — add tmdb.txt with the series ID or click Retry to try again", state.attempts);
                     tracing::info!("{msg}");
@@ -945,7 +960,8 @@ pub async fn fetch_all_metadata(
             }
             Err(e) => {
                 let reason = format!("{e}");
-                let state = db.record_tmdb_failure(&series_id, "series", &reason, MAX_TMDB_LOOKUP_ATTEMPTS);
+                let state =
+                    db.record_tmdb_failure(&series_id, "series", &title, &title, &reason, MAX_TMDB_LOOKUP_ATTEMPTS);
                 let msg = format!(
                     "TMDB search failed for '{title}' (attempt {}/{MAX_TMDB_LOOKUP_ATTEMPTS}): {e}",
                     state.attempts

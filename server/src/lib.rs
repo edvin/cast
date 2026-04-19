@@ -373,6 +373,20 @@ pub async fn start_server(
                         prev_episode_count = new_episodes;
                     }
 
+                    // Drop any failure rows whose underlying file is no longer in the library
+                    // (user removed it on disk between scans).
+                    let mut known_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    for s in lib.series.values() {
+                        known_ids.insert(s.id.clone());
+                        for ep in &s.episodes {
+                            known_ids.insert(ep.id.clone());
+                        }
+                    }
+                    for m in lib.movies.values() {
+                        known_ids.insert(m.id.clone());
+                    }
+                    rescan_state.db.prune_orphan_failures(&known_ids);
+
                     // Fetch TMDB metadata for series + movies that don't have it yet
                     if let Some(ref client) = rescan_state.tmdb {
                         let series_needing_metadata: Vec<_> = lib

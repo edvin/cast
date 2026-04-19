@@ -23,6 +23,12 @@ pub struct AppState {
     pub tmdb: Option<tmdb::TmdbClient>,
     pub active_streams: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     pub remuxing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Episode IDs currently having their thumbnail generated — prevents duplicate
+    /// ffmpeg invocations when the UI asks for the same thumbnail concurrently.
+    pub generating_thumbs: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Caps concurrent thumbnail ffmpegs so loading a 20-episode series page doesn't
+    /// spawn 20 ffmpegs at once.
+    pub thumb_semaphore: Arc<tokio::sync::Semaphore>,
     pub log: Option<LogCallback>,
 }
 
@@ -108,6 +114,11 @@ pub async fn start_server(
     log("Checking for ffmpeg...", &log_cb);
     if media::is_ffmpeg_available() {
         log("ffmpeg detected", &log_cb);
+        log("Probing for hardware encoders (NVENC/QSV/AMF/VideoToolbox)...", &log_cb);
+        log(
+            &format!("Transcoding encoder: {}", routes::detected_encoder_label()),
+            &log_cb,
+        );
     } else {
         log(
             "ffmpeg NOT found in PATH (playback will fail for non-MP4 files)",
@@ -170,6 +181,8 @@ pub async fn start_server(
         tmdb: tmdb_client,
         active_streams: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         remuxing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        generating_thumbs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
         log: log_cb,
     });
 

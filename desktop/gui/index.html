@@ -1153,15 +1153,29 @@
             }
         }
 
-        // Load tool status
+        // Load tool status + hardware encoder info
         async function loadTools() {
             try {
                 const tools = await invoke('get_tools');
                 const el = document.getElementById('statusTools');
-                el.innerHTML = `
+                let html = `
                     <span style="color:${tools.ffmpeg ? '#34c759' : '#ff3b30'}">ffmpeg ${tools.ffmpeg ? '✓' : '✗'}</span>
                     <span style="margin-left:8px;color:${tools.ffprobe ? '#34c759' : '#ff3b30'}">ffprobe ${tools.ffprobe ? '✓' : '✗'}</span>
                 `;
+                // Try to fetch hardware encoder info (requires server running)
+                if (tools.ffmpeg) {
+                    try {
+                        const resp = await fetch(apiUrl('/api/hwenc'));
+                        if (resp.ok) {
+                            const hw = await resp.json();
+                            const color = hw.is_hardware ? '#34c759' : '#ff9f0a';
+                            const icon = hw.is_hardware ? '⚡' : '🐢';
+                            const tip = hw.hint ? ` title="${esc(hw.hint)}"` : '';
+                            html += `<span style="margin-left:8px;color:${color}"${tip}>${icon} ${esc(hw.label)}</span>`;
+                        }
+                    } catch (e) { /* server not running yet */ }
+                }
+                el.innerHTML = html;
             } catch (e) {}
         }
 
@@ -1172,6 +1186,8 @@
         loadTools();
         loadAutostart();
         setTimeout(loadLibrary, 2000);
+        // Re-check encoder status once the server is up (5s after startup)
+        setTimeout(loadTools, 5000);
     </script>
 </body>
 </html>

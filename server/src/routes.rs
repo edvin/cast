@@ -96,8 +96,52 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/series/{series_id}", delete(delete_series))
         .route("/api/episodes/watched", get(get_watched_episodes))
         .route("/api/episodes/{episode_id}", delete(delete_episode))
+        .route("/api/hwenc", get(get_hwenc_info))
         .layer(cors)
         .with_state(state)
+}
+
+#[derive(Serialize)]
+struct HwEncInfo {
+    encoder: &'static str,
+    label: String,
+    is_hardware: bool,
+    hint: Option<String>,
+}
+
+/// Reports the detected transcoding encoder so the desktop GUI can show a warning
+/// when software-only is in use and guide the user toward a HW-capable ffmpeg build.
+async fn get_hwenc_info() -> Json<HwEncInfo> {
+    let (enc, _) = *TRANSCODE_ENCODER;
+    let is_hardware = enc != "libx264";
+    let hint = if is_hardware {
+        None
+    } else if cfg!(target_os = "windows") {
+        Some(
+            "No GPU encoder detected. For 5-20x faster transcoding, install an ffmpeg build with \
+             NVENC/QSV/AMF support — e.g. `winget install Gyan.FFmpeg` or gyan.dev 'release-full', \
+             and ensure your GPU driver is up to date."
+                .to_string(),
+        )
+    } else if cfg!(target_os = "macos") {
+        Some(
+            "No VideoToolbox encoder detected. Install ffmpeg via Homebrew (`brew install ffmpeg`) \
+             to enable hardware transcoding."
+                .to_string(),
+        )
+    } else {
+        Some(
+            "No GPU encoder detected. Install an ffmpeg build with NVENC/VAAPI support and \
+             up-to-date GPU drivers for 5-20x faster transcoding."
+                .to_string(),
+        )
+    };
+    Json(HwEncInfo {
+        encoder: enc,
+        label: detected_encoder_label(),
+        is_hardware,
+        hint,
+    })
 }
 
 // --- DTOs ---
@@ -554,8 +598,66 @@ pub fn needs_remux(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Preferred H.264 encoder for transcoding. Detected once on first access via a short
+/// probe encode against each hardware encoder, falling back to libx264. Order: NVENC
+/// (NVIDIA) → QSV (Intel) → AMF (AMD) → VideoToolbox (macOS) → libx264 (software).
+static TRANSCODE_ENCODER: std::sync::LazyLock<(&'static str, &'static str)> =
+    std::sync::LazyLock::new(detect_transcode_encoder);
+
+fn detect_transcode_encoder() -> (&'static str, &'static str) {
+    // (encoder_name, extra_args). Args tuned for Apple TV playback — H.264 high profile,
+    // good balance of speed/quality. All HW encoders here emit H.264.
+    let candidates: &[(&str, &'static str)] = &[
+        // NVIDIA. preset p4 = "slow" on the p1..p7 scale (good default); -rc vbr -cq 23
+        // gives libx264-ish size/quality. -b:v 0 disables bitrate target so CQ drives it.
+        ("h264_nvenc", "-preset p4 -rc vbr -cq 23 -b:v 0"),
+        // Intel QuickSync
+        ("h264_qsv", "-preset medium -global_quality 23 -look_ahead 1"),
+        // AMD
+        ("h264_amf", "-quality balanced -rc cqp -qp_i 22 -qp_p 22"),
+        // macOS VideoToolbox. -q:v on VT is 0..100, ~55 is a good default.
+        ("h264_videotoolbox", "-q:v 55"),
+    ];
+    for (name, args) in candidates {
+        if probe_encoder(name) {
+            tracing::info!("Hardware encoder detected: {name}");
+            return (name, args);
+        }
+    }
+    tracing::info!("No hardware encoder detected; falling back to libx264");
+    ("libx264", "-crf 18 -preset fast")
+}
+
+/// Probe whether an encoder is usable by doing a tiny test encode. `-encoders` only
+/// tells us the encoder is compiled in, not that the driver/device is actually present.
+fn probe_encoder(name: &str) -> bool {
+    let result = crate::media::ffmpeg_command()
+        .args(["-hide_banner", "-loglevel", "error"])
+        .args(["-f", "lavfi", "-i", "testsrc=duration=0.1:size=64x64:rate=1"])
+        .args(["-c:v", name])
+        .args(["-f", "null", "-"])
+        .output();
+    match result {
+        Ok(out) => out.status.success(),
+        Err(_) => false,
+    }
+}
+
+/// Human-readable name of the detected transcode encoder (for startup log).
+pub fn detected_encoder_label() -> String {
+    let (enc, _) = *TRANSCODE_ENCODER;
+    match enc {
+        "h264_nvenc" => "NVIDIA NVENC (h264_nvenc)".to_string(),
+        "h264_qsv" => "Intel QuickSync (h264_qsv)".to_string(),
+        "h264_amf" => "AMD AMF (h264_amf)".to_string(),
+        "h264_videotoolbox" => "Apple VideoToolbox (h264_videotoolbox)".to_string(),
+        other => format!("software ({other})"),
+    }
+}
+
 /// Check if the video stream needs transcoding (HEVC 10-bit, VP9, etc.)
-/// Returns ("copy", ...) for compatible codecs, ("libx264", ...) for incompatible ones.
+/// Returns ("copy", ...) for compatible codecs, or the detected H.264 encoder for ones
+/// that need to be re-encoded.
 pub fn detect_video_codec(path: &std::path::Path) -> (&'static str, &'static str) {
     let output = crate::media::ffprobe_command()
         .arg("-v")
@@ -580,7 +682,7 @@ pub fn detect_video_codec(path: &std::path::Path) -> (&'static str, &'static str
 
         if is_vp9 || is_av1 || (is_hevc && is_10bit) {
             tracing::info!("Video needs transcoding: {info}");
-            return ("libx264", "-crf 18 -preset fast");
+            return *TRANSCODE_ENCODER;
         }
         if is_hevc {
             // HEVC 8-bit — Apple TV 4K handles this, try copy first
@@ -1030,7 +1132,12 @@ async fn get_series_backdrop(State(state): State<Arc<AppState>>, Path(series_id)
     Ok(([(header::CONTENT_TYPE, content_type)], data).into_response())
 }
 
-/// Serve a thumbnail image for an episode (generated via ffmpeg)
+/// Serve a thumbnail image for an episode (generated via ffmpeg).
+/// - If the file already exists, serve it immediately.
+/// - If another request is already generating this thumbnail, wait for it instead
+///   of spawning a duplicate ffmpeg (TV app loads a whole season of thumbs at once).
+/// - Caps concurrent thumbnail ffmpegs via `thumb_semaphore` so we don't spawn one
+///   ffmpeg per episode when a series page opens.
 async fn get_episode_thumbnail(
     State(state): State<Arc<AppState>>,
     Path(episode_id): Path<String>,
@@ -1038,29 +1145,79 @@ async fn get_episode_thumbnail(
     let thumb_dir = state.media_path.join(".thumbnails");
     let thumb_path = thumb_dir.join(format!("{episode_id}.jpg"));
 
-    // Generate on-demand if missing
     if !thumb_path.exists() {
-        let lib = state.library.read().await;
-        let (_series, episode) = lib
-            .find_episode(&episode_id)
-            .ok_or_else(|| ApiError::not_found("Episode not found"))?;
-        let video_path = safe_media_path(&state.media_path, &episode.path)?;
+        // Try to claim the in-flight slot for this episode. If someone else owns it,
+        // wait for the thumbnail to appear on disk rather than re-running ffmpeg.
+        let claimed = {
+            let mut set = state
+                .generating_thumbs
+                .lock()
+                .map_err(|_| ApiError::internal("lock poisoned"))?;
+            if set.contains(&episode_id) {
+                false
+            } else {
+                set.insert(episode_id.clone());
+                true
+            }
+        };
 
-        // Create thumbnail directory
-        tokio::fs::create_dir_all(&thumb_dir)
-            .await
-            .map_err(|_| ApiError::internal("Failed to create thumbnail directory"))?;
+        if !claimed {
+            // Another task is generating — poll for the file with a short timeout.
+            for _ in 0..60 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if thumb_path.exists() {
+                    break;
+                }
+            }
+            if !thumb_path.exists() {
+                return Err(ApiError::internal("Thumbnail generation timed out"));
+            }
+        } else {
+            // We own the slot — ensure we release it even on error.
+            struct Guard<'a> {
+                set: &'a Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+                id: &'a str,
+            }
+            impl Drop for Guard<'_> {
+                fn drop(&mut self) {
+                    if let Ok(mut s) = self.set.lock() {
+                        s.remove(self.id);
+                    }
+                }
+            }
+            let _guard = Guard {
+                set: &state.generating_thumbs,
+                id: &episode_id,
+            };
 
-        // Generate thumbnail at ~10% or 30s
-        let duration = crate::media::probe_duration(&video_path).unwrap_or(300.0);
-        let timestamp = (duration * 0.1).min(30.0);
+            let lib = state.library.read().await;
+            let (_series, episode) = lib
+                .find_episode(&episode_id)
+                .ok_or_else(|| ApiError::not_found("Episode not found"))?;
+            let video_path = safe_media_path(&state.media_path, &episode.path)?;
+            drop(lib);
 
-        let vp = video_path.clone();
-        let tp = thumb_path.clone();
-        tokio::task::spawn_blocking(move || crate::media::generate_thumbnail(&vp, &tp, timestamp))
-            .await
-            .map_err(|_| ApiError::internal("Failed to generate thumbnail"))?
-            .map_err(|_| ApiError::internal("Failed to generate thumbnail"))?;
+            tokio::fs::create_dir_all(&thumb_dir)
+                .await
+                .map_err(|_| ApiError::internal("Failed to create thumbnail directory"))?;
+
+            // Global concurrency cap across all in-flight thumbnail generators
+            let _permit = state
+                .thumb_semaphore
+                .acquire()
+                .await
+                .map_err(|_| ApiError::internal("Thumbnail semaphore closed"))?;
+
+            let duration = crate::media::probe_duration(&video_path).unwrap_or(300.0);
+            let timestamp = (duration * 0.1).min(30.0);
+
+            let vp = video_path.clone();
+            let tp = thumb_path.clone();
+            tokio::task::spawn_blocking(move || crate::media::generate_thumbnail(&vp, &tp, timestamp))
+                .await
+                .map_err(|_| ApiError::internal("Failed to generate thumbnail"))?
+                .map_err(|_| ApiError::internal("Failed to generate thumbnail"))?;
+        }
     }
 
     if !thumb_path.exists() {
@@ -1876,6 +2033,8 @@ mod tests {
             tmdb: None,
             active_streams: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            generating_thumbs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
             log: None,
         });
 
@@ -2180,6 +2339,8 @@ mod tests {
             tmdb: None,
             active_streams: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            generating_thumbs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
             log: None,
         });
 
@@ -2245,6 +2406,8 @@ mod tests {
             tmdb: None,
             active_streams: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            generating_thumbs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
             log: None,
         });
 
@@ -2464,6 +2627,8 @@ mod tests {
             tmdb: None,
             active_streams: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            generating_thumbs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
             log: None,
         });
 

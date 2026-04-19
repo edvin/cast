@@ -48,6 +48,24 @@ struct APIClient {
         return req
     }
 
+    private func request<T: Decodable>(_ url: URL) async throws -> T {
+        let (data, response) = try await URLSession.shared.data(from: url)
+        guard let http = response as? HTTPURLResponse else {
+            throw CastError.networkError("Invalid response")
+        }
+        if http.statusCode >= 400 {
+            if let apiError = try? JSONDecoder().decode(ApiError.self, from: data) {
+                throw CastError.serverError(apiError)
+            }
+            throw CastError.networkError("Server returned \(http.statusCode)")
+        }
+        do {
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch {
+            throw CastError.decodingError(error.localizedDescription)
+        }
+    }
+
     // MARK: - Continue Watching
 
     func continueWatching() async throws -> [ContinueWatchingItem] {

@@ -109,10 +109,10 @@ struct HwEncInfo {
     hint: Option<String>,
 }
 
-/// Reports the detected transcoding encoder so the desktop GUI can show a warning
+/// Reports the active transcoding encoder so the desktop GUI can show a warning
 /// when software-only is in use and guide the user toward a HW-capable ffmpeg build.
-async fn get_hwenc_info() -> Json<HwEncInfo> {
-    let (enc, _) = *TRANSCODE_ENCODER;
+async fn get_hwenc_info(State(state): State<Arc<AppState>>) -> Json<HwEncInfo> {
+    let enc = state.transcode_encoder.0;
     let is_hardware = enc != "libx264";
     let hint = if is_hardware {
         None
@@ -138,7 +138,7 @@ async fn get_hwenc_info() -> Json<HwEncInfo> {
     };
     Json(HwEncInfo {
         encoder: enc,
-        label: detected_encoder_label(),
+        label: state.encoder_label.clone(),
         is_hardware,
         hint,
     })
@@ -598,43 +598,13 @@ pub fn needs_remux(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Preferred H.264 encoder for transcoding. Detected once on first access via a short
-/// probe encode against each hardware encoder, falling back to libx264. Order: NVENC
-/// (NVIDIA) → QSV (Intel) → AMF (AMD) → VideoToolbox (macOS) → libx264 (software).
-///
-/// Can be overridden via the CAST_ENCODER env var:
-///   auto (default) | nvenc | qsv | amf | videotoolbox | libx264 | software
-static TRANSCODE_ENCODER: std::sync::LazyLock<(&'static str, &'static str)> = std::sync::LazyLock::new(|| {
-    let probes = probe_all_encoders();
-    let override_value = std::env::var("CAST_ENCODER").ok().map(|s| s.trim().to_lowercase());
-    match override_value.as_deref() {
-        Some("auto") | Some("") | None => pick_encoder(&probes),
-        Some("software") | Some("libx264") => ("libx264", "-crf 18 -preset fast"),
-        Some(other) => {
-            let full_name = match other {
-                "nvenc" | "h264_nvenc" => "h264_nvenc",
-                "qsv" | "h264_qsv" => "h264_qsv",
-                "amf" | "h264_amf" => "h264_amf",
-                "videotoolbox" | "vt" | "h264_videotoolbox" => "h264_videotoolbox",
-                _ => {
-                    tracing::warn!("Unknown CAST_ENCODER '{other}', falling back to auto");
-                    return pick_encoder(&probes);
-                }
-            };
-            if let Some(found) = probes.iter().find(|(n, _, r)| *n == full_name && r.is_ok()) {
-                tracing::info!("CAST_ENCODER override: using {full_name}");
-                (found.0, found.1)
-            } else {
-                tracing::warn!("CAST_ENCODER={other} requested but probe failed; falling back to auto");
-                pick_encoder(&probes)
-            }
-        }
-    }
-});
+/// One probe result: encoder name, its ffmpeg args, and whether it's usable on this machine.
+pub type EncoderProbe = (&'static str, &'static str, Result<(), String>);
 
-/// Run the probe against every candidate, returning all results so the caller can
-/// surface them to the user log. Order matches encoder preference.
-pub fn probe_all_encoders() -> Vec<(&'static str, &'static str, Result<(), String>)> {
+/// Probe results cached once per process — the hardware doesn't change mid-run, but the
+/// *selection* (which probed encoder we actually use) can differ per `start_server` call
+/// depending on the ServerConfig override.
+static PROBED_ENCODERS: std::sync::LazyLock<Vec<EncoderProbe>> = std::sync::LazyLock::new(|| {
     const CANDIDATES: &[(&str, &str)] = &[
         ("h264_nvenc", "-preset p4 -rc vbr -cq 23 -b:v 0"),
         ("h264_qsv", "-preset medium -global_quality 23 -look_ahead 1"),
@@ -645,9 +615,64 @@ pub fn probe_all_encoders() -> Vec<(&'static str, &'static str, Result<(), Strin
         .iter()
         .map(|(name, args)| (*name, *args, probe_encoder(name)))
         .collect()
+});
+
+/// Run the probe against every candidate, returning all results so the caller can
+/// surface them to the user log. Cached via PROBED_ENCODERS so re-invocations are free.
+pub fn probe_all_encoders() -> &'static [EncoderProbe] {
+    &PROBED_ENCODERS
 }
 
-fn pick_encoder(probes: &[(&'static str, &'static str, Result<(), String>)]) -> (&'static str, &'static str) {
+/// Resolve an encoder override string (from config/env) into a concrete encoder tuple.
+/// Accepts: auto | nvenc | qsv | amf | videotoolbox | software | libx264, plus aliases.
+/// Returns `(encoder, args, selection_log_message)` — the log message is meant for the
+/// UI so users can see why a particular encoder was chosen or rejected.
+pub fn resolve_encoder(override_value: Option<&str>) -> ((&'static str, &'static str), String) {
+    let probes = probe_all_encoders();
+    let choice = override_value.map(|s| s.trim().to_lowercase());
+    match choice.as_deref() {
+        Some("auto") | Some("") | None => {
+            let enc = pick_first_ok(probes);
+            (enc, format!("Transcoding encoder: {} (auto)", label_for(enc.0)))
+        }
+        Some("software") | Some("libx264") => (
+            ("libx264", "-crf 18 -preset fast"),
+            "Transcoding encoder: software (libx264) — explicitly requested".to_string(),
+        ),
+        Some(other) => {
+            let full_name = match other {
+                "nvenc" | "h264_nvenc" => "h264_nvenc",
+                "qsv" | "h264_qsv" => "h264_qsv",
+                "amf" | "h264_amf" => "h264_amf",
+                "videotoolbox" | "vt" | "h264_videotoolbox" => "h264_videotoolbox",
+                _ => {
+                    let enc = pick_first_ok(probes);
+                    return (
+                        enc,
+                        format!("Unknown encoder '{other}', falling back to {}", label_for(enc.0)),
+                    );
+                }
+            };
+            if let Some(found) = probes.iter().find(|(n, _, r)| *n == full_name && r.is_ok()) {
+                (
+                    (found.0, found.1),
+                    format!("Transcoding encoder: {} (requested)", label_for(full_name)),
+                )
+            } else {
+                let enc = pick_first_ok(probes);
+                (
+                    enc,
+                    format!(
+                        "Requested encoder {full_name} isn't available on this machine; falling back to {}",
+                        label_for(enc.0)
+                    ),
+                )
+            }
+        }
+    }
+}
+
+fn pick_first_ok(probes: &[EncoderProbe]) -> (&'static str, &'static str) {
     for (name, args, result) in probes {
         if result.is_ok() {
             return (*name, *args);
@@ -658,8 +683,6 @@ fn pick_encoder(probes: &[(&'static str, &'static str, Result<(), String>)]) -> 
 
 /// Probe whether an encoder is usable by doing a tiny test encode. `-encoders` only
 /// tells us the encoder is compiled in, not that the driver/device is actually present.
-/// Returns Ok(()) on success, or Err with a short reason so the startup log can
-/// explain why a hardware encoder was skipped.
 fn probe_encoder(name: &str) -> Result<(), String> {
     // 1 second at 25 fps → 25 frames at 256x256. Larger than NVENC's 48x48 min and
     // produces enough frames that any encoder that's going to work will accept it.
@@ -673,7 +696,6 @@ fn probe_encoder(name: &str) -> Result<(), String> {
     if out.status.success() {
         return Ok(());
     }
-    // ffmpeg emits the actual reason on stderr — capture its first meaningful line.
     let stderr = String::from_utf8_lossy(&out.stderr);
     let reason = stderr
         .lines()
@@ -684,10 +706,9 @@ fn probe_encoder(name: &str) -> Result<(), String> {
     Err(reason)
 }
 
-/// Human-readable name of the detected transcode encoder (for startup log).
-pub fn detected_encoder_label() -> String {
-    let (enc, _) = *TRANSCODE_ENCODER;
-    match enc {
+/// Human-readable name of an encoder id.
+pub fn label_for(encoder: &str) -> String {
+    match encoder {
         "h264_nvenc" => "NVIDIA NVENC (h264_nvenc)".to_string(),
         "h264_qsv" => "Intel QuickSync (h264_qsv)".to_string(),
         "h264_amf" => "AMD AMF (h264_amf)".to_string(),
@@ -697,9 +718,12 @@ pub fn detected_encoder_label() -> String {
 }
 
 /// Check if the video stream needs transcoding (HEVC 10-bit, VP9, etc.)
-/// Returns ("copy", ...) for compatible codecs, or the detected H.264 encoder for ones
-/// that need to be re-encoded.
-pub fn detect_video_codec(path: &std::path::Path) -> (&'static str, &'static str) {
+/// Returns ("copy", ...) for compatible codecs, or the server's configured transcode
+/// encoder for codecs that need to be re-encoded.
+pub fn detect_video_codec(
+    path: &std::path::Path,
+    transcode_encoder: (&'static str, &'static str),
+) -> (&'static str, &'static str) {
     let output = crate::media::ffprobe_command()
         .arg("-v")
         .arg("quiet")
@@ -715,7 +739,6 @@ pub fn detect_video_codec(path: &std::path::Path) -> (&'static str, &'static str
     if let Ok(output) = output {
         let info = String::from_utf8_lossy(&output.stdout);
         let info = info.trim();
-        // e.g. "hevc,yuv420p10le" or "h264,yuv420p"
         let is_hevc = info.starts_with("hevc") || info.starts_with("h265");
         let is_10bit = info.contains("10le") || info.contains("10be");
         let is_vp9 = info.starts_with("vp9");
@@ -723,10 +746,9 @@ pub fn detect_video_codec(path: &std::path::Path) -> (&'static str, &'static str
 
         if is_vp9 || is_av1 || (is_hevc && is_10bit) {
             tracing::info!("Video needs transcoding: {info}");
-            return *TRANSCODE_ENCODER;
+            return transcode_encoder;
         }
         if is_hevc {
-            // HEVC 8-bit — Apple TV 4K handles this, try copy first
             tracing::info!("Video is HEVC 8-bit, using copy: {info}");
             return ("copy", "");
         }
@@ -882,7 +904,7 @@ async fn stream_remuxed(
 
     // Not cached — stream directly from ffmpeg as fragmented MP4 (instant start)
     // and tee the output to a cache file for future plays
-    let (video_codec, video_extra) = detect_video_codec(&file_path);
+    let (video_codec, video_extra) = detect_video_codec(&file_path, state.transcode_encoder);
     state.log(&format!(
         "Streaming+caching: {} (video: {video_codec})",
         file_path.file_name().unwrap().to_string_lossy()
@@ -1531,7 +1553,7 @@ async fn prepare_episode(
     let remuxing_ref = state.remuxing.clone();
     let log_state = state.clone();
     tokio::task::spawn_blocking(move || {
-        let (video_codec, video_extra) = detect_video_codec(&file_path_clone);
+        let (video_codec, video_extra) = detect_video_codec(&file_path_clone, log_state.transcode_encoder);
         log_state.log(&format!(
             "On-demand remux: {} (video: {video_codec})",
             file_path_clone.file_name().unwrap().to_string_lossy()
@@ -1696,7 +1718,7 @@ async fn remux_series(
                 let stem_clone = stem.clone();
 
                 let result = tokio::task::spawn_blocking(move || {
-                    let (video_codec, video_extra) = detect_video_codec(&ep_path_clone);
+                    let (video_codec, video_extra) = detect_video_codec(&ep_path_clone, log_state.transcode_encoder);
                     log_state.log(&format!(
                         "Batch remux [{}/{total}]: {} (video: {video_codec})",
                         index + 1,
@@ -2076,6 +2098,8 @@ mod tests {
             remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             generating_thumbs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
+            transcode_encoder: ("libx264", "-crf 18 -preset fast"),
+            encoder_label: "software (libx264)".to_string(),
             log: None,
         });
 
@@ -2382,6 +2406,8 @@ mod tests {
             remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             generating_thumbs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
+            transcode_encoder: ("libx264", "-crf 18 -preset fast"),
+            encoder_label: "software (libx264)".to_string(),
             log: None,
         });
 
@@ -2449,6 +2475,8 @@ mod tests {
             remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             generating_thumbs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
+            transcode_encoder: ("libx264", "-crf 18 -preset fast"),
+            encoder_label: "software (libx264)".to_string(),
             log: None,
         });
 
@@ -2670,6 +2698,8 @@ mod tests {
             remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             generating_thumbs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
+            transcode_encoder: ("libx264", "-crf 18 -preset fast"),
+            encoder_label: "software (libx264)".to_string(),
             log: None,
         });
 

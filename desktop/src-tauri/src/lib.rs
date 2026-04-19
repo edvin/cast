@@ -194,6 +194,11 @@ async fn restart_server(
         } else {
             Some(config.tmdb_key.clone())
         },
+        encoder_override: if config.encoder.is_empty() {
+            None
+        } else {
+            Some(config.encoder.clone())
+        },
     };
 
     let log_cb = {
@@ -530,6 +535,11 @@ pub fn run() {
                         None
                     } else {
                         Some(config.tmdb_key.clone())
+                    },
+                    encoder_override: if config.encoder.is_empty() {
+                        None
+                    } else {
+                        Some(config.encoder.clone())
                     },
                 };
 

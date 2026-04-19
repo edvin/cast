@@ -29,6 +29,11 @@ pub struct AppState {
     /// Caps concurrent thumbnail ffmpegs so loading a 20-episode series page doesn't
     /// spawn 20 ffmpegs at once.
     pub thumb_semaphore: Arc<tokio::sync::Semaphore>,
+    /// The H.264 encoder (name + ffmpeg args) to use when a file needs re-encoding.
+    /// Picked at start_server based on config + probe results.
+    pub transcode_encoder: (&'static str, &'static str),
+    /// Human-readable label for the encoder, surfaced via /api/hwenc and the UI.
+    pub encoder_label: String,
     pub log: Option<LogCallback>,
 }
 
@@ -49,6 +54,8 @@ pub struct ServerConfig {
     pub port: u16,
     pub name: String,
     pub tmdb_key: Option<String>,
+    /// Encoder override: "auto" (default) | nvenc | qsv | amf | videotoolbox | software
+    pub encoder_override: Option<String>,
 }
 
 /// A handle to the running server, can be used to get state info
@@ -112,7 +119,8 @@ pub async fn start_server(
         log("ffprobe NOT found in PATH (thumbnails/duration disabled)", &log_cb);
     }
     log("Checking for ffmpeg...", &log_cb);
-    if media::is_ffmpeg_available() {
+    let ffmpeg_ok = media::is_ffmpeg_available();
+    if ffmpeg_ok {
         log("ffmpeg detected", &log_cb);
         log("Probing hardware encoders (NVENC/QSV/AMF/VideoToolbox)...", &log_cb);
         for (name, _args, result) in routes::probe_all_encoders() {
@@ -121,16 +129,23 @@ pub async fn start_server(
                 Err(reason) => log(&format!("  {name}: unavailable — {reason}"), &log_cb),
             }
         }
-        log(
-            &format!("Transcoding encoder: {}", routes::detected_encoder_label()),
-            &log_cb,
-        );
     } else {
         log(
             "ffmpeg NOT found in PATH (playback will fail for non-MP4 files)",
             &log_cb,
         );
     }
+
+    // Resolve encoder based on config (or CAST_ENCODER env var if config didn't set it).
+    let encoder_choice = config
+        .encoder_override
+        .clone()
+        .or_else(|| std::env::var("CAST_ENCODER").ok());
+    let (transcode_encoder, encoder_msg) = routes::resolve_encoder(encoder_choice.as_deref());
+    if ffmpeg_ok {
+        log(&encoder_msg, &log_cb);
+    }
+    let encoder_label = routes::label_for(transcode_encoder.0);
 
     log("Opening cast.db...", &log_cb);
     let db = db::Database::new(&media_path).map_err(|e| {
@@ -189,6 +204,8 @@ pub async fn start_server(
         remuxing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         generating_thumbs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
+        transcode_encoder,
+        encoder_label,
         log: log_cb,
     });
 
@@ -365,7 +382,7 @@ pub async fn start_server(
                 }
 
                 let tmp_path = target.parent().unwrap().join(format!("{stem}.mp4.tmp"));
-                let (video_codec, video_extra) = routes::detect_video_codec(source);
+                let (video_codec, video_extra) = routes::detect_video_codec(source, remux_state.transcode_encoder);
                 let action = if video_codec == "copy" {
                     "Remuxing"
                 } else {

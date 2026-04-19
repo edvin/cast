@@ -31,6 +31,11 @@ struct Args {
     #[arg(long, env = "TMDB_API_KEY")]
     tmdb_key: Option<String>,
 
+    /// Override the transcoding encoder
+    /// [values: auto, nvenc, qsv, amf, videotoolbox, software]
+    #[arg(long, env = "CAST_ENCODER")]
+    encoder: Option<String>,
+
     /// Log to file in the media directory instead of stdout
     #[arg(long)]
     log_file: bool,
@@ -79,6 +84,7 @@ async fn main() {
         port: args.port,
         name: args.name,
         tmdb_key: args.tmdb_key,
+        encoder_override: args.encoder,
     };
 
     match cast_server::start_server(config, None).await {

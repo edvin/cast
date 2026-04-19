@@ -512,12 +512,17 @@ impl TmdbClient {
             })
             .collect();
 
-        // Sort by rating descending (best known roles first). Ratings are optional and can be
+        // Sort by year descending (most recent appearances first), with rating as a tiebreaker
+        // for roles in the same year. Entries missing a year sink to the bottom. Ratings may be
         // NaN from malformed TMDB payloads, so normalise to a total-orderable f64 via total_cmp.
         known_for.sort_by(|a, b| {
-            let ar = a.rating.filter(|r| r.is_finite()).unwrap_or(f64::NEG_INFINITY);
-            let br = b.rating.filter(|r| r.is_finite()).unwrap_or(f64::NEG_INFINITY);
-            br.total_cmp(&ar)
+            let ay = a.year.as_deref().and_then(|y| y.parse::<i32>().ok()).unwrap_or(i32::MIN);
+            let by = b.year.as_deref().and_then(|y| y.parse::<i32>().ok()).unwrap_or(i32::MIN);
+            by.cmp(&ay).then_with(|| {
+                let ar = a.rating.filter(|r| r.is_finite()).unwrap_or(f64::NEG_INFINITY);
+                let br = b.rating.filter(|r| r.is_finite()).unwrap_or(f64::NEG_INFINITY);
+                br.total_cmp(&ar)
+            })
         });
 
         Ok(Some(PersonDetail {

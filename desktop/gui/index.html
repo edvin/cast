@@ -357,10 +357,13 @@
         <!-- Library page -->
         <div class="page active" id="page-library">
             <div class="library-summary" id="librarySummary"></div>
+            <div id="seriesSectionHeader" style="display:none; font-size:15px; font-weight:600; color:#ddd; margin:0 0 10px 2px;">Series</div>
             <div id="seriesGrid" class="series-grid"></div>
+            <div id="moviesSectionHeader" style="display:none; font-size:15px; font-weight:600; color:#ddd; margin:24px 0 10px 2px;">Movies</div>
+            <div id="moviesGrid" class="series-grid"></div>
             <div id="seriesEmpty" class="series-empty" style="display:none;">
                 <div style="font-size: 40px;">📺</div>
-                <div>No series found</div>
+                <div>No series or movies found</div>
                 <div style="font-size: 12px;">Configure your media path in Settings</div>
             </div>
         </div>
@@ -795,15 +798,25 @@
 
         async function loadLibrary() {
             const grid = document.getElementById('seriesGrid');
+            const seriesHeader = document.getElementById('seriesSectionHeader');
+            const moviesGrid = document.getElementById('moviesGrid');
+            const moviesHeader = document.getElementById('moviesSectionHeader');
             const empty = document.getElementById('seriesEmpty');
             const summary = document.getElementById('librarySummary');
             try {
-                const resp = await fetch(apiUrl('/api/series'));
-                if (!resp.ok) throw new Error('Server not responding');
-                const series = await resp.json();
+                const [seriesResp, moviesResp] = await Promise.all([
+                    fetch(apiUrl('/api/series')),
+                    fetch(apiUrl('/api/movies')),
+                ]);
+                if (!seriesResp.ok) throw new Error('Server not responding');
+                const series = await seriesResp.json();
+                const movies = moviesResp.ok ? await moviesResp.json() : [];
 
-                if (series.length === 0) {
+                if (series.length === 0 && movies.length === 0) {
                     grid.style.display = 'none';
+                    moviesGrid.style.display = 'none';
+                    seriesHeader.style.display = 'none';
+                    moviesHeader.style.display = 'none';
                     empty.style.display = 'flex';
                     summary.innerHTML = '';
                     return;
@@ -813,11 +826,14 @@
                 const totalEps = series.reduce((a, s) => a + s.episode_count, 0);
                 const watchedEps = series.reduce((a, s) => a + s.watched_count, 0);
                 const withMetadata = series.filter(s => s.has_metadata).length;
+                const moviesWithMetadata = movies.filter(m => m.has_metadata).length;
+                const watchedMovies = movies.filter(m => m.progress && m.progress.completed).length;
                 summary.innerHTML = `
                     <span class="summary-chip"><span class="num">${series.length}</span> series</span>
                     <span class="summary-chip"><span class="num">${totalEps}</span> episodes</span>
-                    <span class="summary-chip ${watchedEps > 0 ? 'ok' : ''}"><span class="num">${watchedEps}</span> watched</span>
-                    <span class="summary-chip">${withMetadata}/${series.length} with metadata</span>
+                    ${movies.length > 0 ? `<span class="summary-chip"><span class="num">${movies.length}</span> movies</span>` : ''}
+                    <span class="summary-chip ${watchedEps + watchedMovies > 0 ? 'ok' : ''}"><span class="num">${watchedEps + watchedMovies}</span> watched</span>
+                    <span class="summary-chip">${withMetadata + moviesWithMetadata}/${series.length + movies.length} with metadata</span>
                     <span style="margin-left:auto; display:flex; gap:8px;">
                         <button class="action-btn" onclick="rescanLibrary(this)" id="rescanBtn">🔄 Rescan</button>
                         <button class="action-btn ${showUnwatchedOnly ? 'active-filter' : ''}" onclick="toggleUnwatchedFilter()">
@@ -828,42 +844,164 @@
                 `;
 
                 lastSeriesData = series;
-                const filtered = showUnwatchedOnly
+                const filteredSeries = showUnwatchedOnly
                     ? series.filter(s => s.watched_count < s.total_count)
                     : series;
+                const filteredMovies = showUnwatchedOnly
+                    ? movies.filter(m => !m.progress || !m.progress.completed)
+                    : movies;
 
-                if (filtered.length === 0 && showUnwatchedOnly) {
+                if (filteredSeries.length === 0 && filteredMovies.length === 0 && showUnwatchedOnly) {
                     grid.style.display = 'none';
+                    moviesGrid.style.display = 'none';
+                    seriesHeader.style.display = 'none';
+                    moviesHeader.style.display = 'none';
                     empty.style.display = 'flex';
-                    empty.innerHTML = '<div style="font-size: 40px;">🎉</div><div>All caught up!</div><div style="font-size: 12px;">Every episode has been watched</div>';
+                    empty.innerHTML = '<div style="font-size: 40px;">🎉</div><div>All caught up!</div><div style="font-size: 12px;">Everything in your library has been watched</div>';
                     return;
                 }
 
-                grid.style.display = 'grid';
                 empty.style.display = 'none';
-                grid.innerHTML = filtered.map(s => `
-                    <div class="series-card" onclick="showDetail('${s.id}')">
-                        ${s.has_backdrop
-                            ? `<img class="series-card-image" src="${apiUrl('/api/series/' + s.id + '/backdrop')}" loading="lazy">`
-                            : s.has_art
-                                ? `<img class="series-card-image" src="${apiUrl('/api/series/' + s.id + '/art')}" loading="lazy">`
-                                : `<div class="series-card-image" style="display:flex;align-items:center;justify-content:center;font-size:32px;color:#333;">${s.title.charAt(0)}</div>`
-                        }
-                        <div class="series-card-body">
-                            <div class="series-card-title">${esc(s.title)}</div>
-                            <div class="series-card-meta">
-                                ${s.year ? `<span>${s.year}</span>` : ''}
-                                ${s.rating ? `<span class="rating">★ ${s.rating.toFixed(1)}</span>` : ''}
-                                ${s.genres ? `<span>${esc(s.genres)}</span>` : ''}
+
+                // Series section
+                if (filteredSeries.length > 0) {
+                    seriesHeader.style.display = 'block';
+                    grid.style.display = 'grid';
+                    grid.innerHTML = filteredSeries.map(s => `
+                        <div class="series-card" onclick="showDetail('${s.id}')">
+                            ${s.has_backdrop
+                                ? `<img class="series-card-image" src="${apiUrl('/api/series/' + s.id + '/backdrop')}" loading="lazy">`
+                                : s.has_art
+                                    ? `<img class="series-card-image" src="${apiUrl('/api/series/' + s.id + '/art')}" loading="lazy">`
+                                    : `<div class="series-card-image" style="display:flex;align-items:center;justify-content:center;font-size:32px;color:#333;">${s.title.charAt(0)}</div>`
+                            }
+                            <div class="series-card-body">
+                                <div class="series-card-title">${esc(s.title)}</div>
+                                <div class="series-card-meta">
+                                    ${s.year ? `<span>${s.year}</span>` : ''}
+                                    ${s.rating ? `<span class="rating">★ ${s.rating.toFixed(1)}</span>` : ''}
+                                    ${s.genres ? `<span>${esc(s.genres)}</span>` : ''}
+                                </div>
+                                <div class="series-card-episodes">${s.episode_count} episode${s.episode_count !== 1 ? 's' : ''} · ${s.watched_count} watched</div>
                             </div>
-                            <div class="series-card-episodes">${s.episode_count} episode${s.episode_count !== 1 ? 's' : ''} · ${s.watched_count} watched</div>
                         </div>
-                    </div>
-                `).join('');
+                    `).join('');
+                } else {
+                    seriesHeader.style.display = 'none';
+                    grid.style.display = 'none';
+                }
+
+                // Movies section
+                if (filteredMovies.length > 0) {
+                    moviesHeader.style.display = 'block';
+                    moviesGrid.style.display = 'grid';
+                    moviesGrid.innerHTML = filteredMovies.map(m => {
+                        const art = m.has_art ? apiUrl('/api/movies/' + m.id + '/art')
+                                  : m.has_backdrop ? apiUrl('/api/movies/' + m.id + '/backdrop')
+                                  : null;
+                        const image = art
+                            ? `<img class="series-card-image" src="${art}" loading="lazy">`
+                            : `<div class="series-card-image" style="display:flex;align-items:center;justify-content:center;font-size:32px;color:#333;">${m.title.charAt(0)}</div>`;
+                        const watched = m.progress && m.progress.completed ? ' · ✓ watched' : '';
+                        return `
+                            <div class="series-card" onclick="showMovieDetail('${m.id}')">
+                                ${image}
+                                <div class="series-card-body">
+                                    <div class="series-card-title">${esc(m.title)}</div>
+                                    <div class="series-card-meta">
+                                        ${m.year ? `<span>${m.year}</span>` : ''}
+                                        ${m.rating ? `<span class="rating">★ ${m.rating.toFixed(1)}</span>` : ''}
+                                        ${m.runtime_minutes ? `<span>${m.runtime_minutes} min</span>` : ''}
+                                        ${m.genres ? `<span>${esc(m.genres)}</span>` : ''}
+                                    </div>
+                                    <div class="series-card-episodes">${formatBytes(m.size_bytes)}${watched}</div>
+                                </div>
+                            </div>
+                        `;
+                    }).join('');
+                } else {
+                    moviesHeader.style.display = 'none';
+                    moviesGrid.style.display = 'none';
+                }
             } catch (e) {
                 grid.style.display = 'none';
+                moviesGrid.style.display = 'none';
+                seriesHeader.style.display = 'none';
+                moviesHeader.style.display = 'none';
                 empty.style.display = 'flex';
                 empty.innerHTML = '<div style="font-size: 40px;">⚠️</div><div>Cannot connect to server</div><div style="font-size: 12px;">Start the server from Settings</div>';
+            }
+        }
+
+        function formatBytes(bytes) {
+            if (bytes > 1073741824) return (bytes / 1073741824).toFixed(1) + ' GB';
+            if (bytes > 1048576) return (bytes / 1048576).toFixed(0) + ' MB';
+            return bytes + ' B';
+        }
+
+        async function showMovieDetail(movieId) {
+            const overlay = document.getElementById('detailOverlay');
+            const content = document.getElementById('detailContent');
+            try {
+                const resp = await fetch(apiUrl(`/api/movies/${movieId}`));
+                if (!resp.ok) {
+                    showToast('Could not load movie', '', 'error');
+                    return;
+                }
+                const m = await resp.json();
+
+                const art = m.has_art ? apiUrl('/api/movies/' + m.id + '/art')
+                          : m.has_backdrop ? apiUrl('/api/movies/' + m.id + '/backdrop')
+                          : null;
+                const progressBit = m.progress && !m.progress.completed && m.progress.duration_secs > 0
+                    ? `<div style="font-size:12px;color:#888;margin-top:6px;">Resumes at ${Math.floor(m.progress.position_secs / 60)} min of ${Math.floor(m.progress.duration_secs / 60)} min</div>`
+                    : (m.progress && m.progress.completed ? '<div style="font-size:12px;color:#34c759;margin-top:6px;">✓ Watched</div>' : '');
+
+                content.innerHTML = `
+                    <div class="detail-header">
+                        ${art ? `<img class="detail-art" src="${art}">` : ''}
+                        <div class="detail-info">
+                            <div class="detail-title">${esc(m.title)}</div>
+                            ${m.tagline ? `<div style="font-style:italic;color:#aaa;margin-bottom:8px;">${esc(m.tagline)}</div>` : ''}
+                            <div class="detail-meta">
+                                ${m.year ? `<span>${m.year}</span>` : ''}
+                                ${m.rating ? `<span class="rating">★ ${m.rating.toFixed(1)}</span>` : ''}
+                                ${m.runtime_minutes ? `<span>${m.runtime_minutes} min</span>` : ''}
+                                ${m.genres ? `<span>${esc(m.genres)}</span>` : ''}
+                            </div>
+                            ${m.overview ? `<div class="detail-overview">${esc(m.overview)}</div>` : ''}
+                            ${progressBit}
+                            <div style="display:flex;gap:10px;margin-top:16px;">
+                                <button class="action-btn" onclick="playMovie('${esc(m.path)}')">▶ Play</button>
+                                <button class="action-btn danger" onclick="deleteMovie('${esc(m.id)}', '${esc(m.title)}')">🗑 Delete</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                overlay.classList.add('active');
+            } catch (e) {
+                showToast('Could not load movie', String(e), 'error');
+            }
+        }
+
+        async function playMovie(relPath) {
+            try {
+                await invoke('play_file', { filePath: relPath });
+            } catch (e) {
+                showToast('Play failed', String(e), 'error');
+            }
+        }
+
+        async function deleteMovie(movieId, title) {
+            const ok = await showConfirm(`Delete "${title}"?`, 'This removes the source video file and any related subtitles/artwork in the movie folder.', 'Delete');
+            if (!ok) return;
+            try {
+                await fetch(apiUrl('/api/movies/' + encodeURIComponent(movieId)), { method: 'DELETE' });
+                closeDetail();
+                loadLibrary();
+                showToast('Movie deleted', '', 'success');
+            } catch (e) {
+                showToast('Delete failed', String(e), 'error');
             }
         }
 

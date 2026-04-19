@@ -114,7 +114,13 @@ pub async fn start_server(
     log("Checking for ffmpeg...", &log_cb);
     if media::is_ffmpeg_available() {
         log("ffmpeg detected", &log_cb);
-        log("Probing for hardware encoders (NVENC/QSV/AMF/VideoToolbox)...", &log_cb);
+        log("Probing hardware encoders (NVENC/QSV/AMF/VideoToolbox)...", &log_cb);
+        for (name, _args, result) in routes::probe_all_encoders() {
+            match result {
+                Ok(()) => log(&format!("  {name}: OK"), &log_cb),
+                Err(reason) => log(&format!("  {name}: unavailable — {reason}"), &log_cb),
+            }
+        }
         log(
             &format!("Transcoding encoder: {}", routes::detected_encoder_label()),
             &log_cb,

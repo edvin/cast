@@ -602,45 +602,58 @@ pub fn needs_remux(path: &std::path::Path) -> bool {
 /// probe encode against each hardware encoder, falling back to libx264. Order: NVENC
 /// (NVIDIA) → QSV (Intel) → AMF (AMD) → VideoToolbox (macOS) → libx264 (software).
 static TRANSCODE_ENCODER: std::sync::LazyLock<(&'static str, &'static str)> =
-    std::sync::LazyLock::new(detect_transcode_encoder);
+    std::sync::LazyLock::new(|| pick_encoder(&probe_all_encoders()));
 
-fn detect_transcode_encoder() -> (&'static str, &'static str) {
-    // (encoder_name, extra_args). Args tuned for Apple TV playback — H.264 high profile,
-    // good balance of speed/quality. All HW encoders here emit H.264.
-    let candidates: &[(&str, &'static str)] = &[
-        // NVIDIA. preset p4 = "slow" on the p1..p7 scale (good default); -rc vbr -cq 23
-        // gives libx264-ish size/quality. -b:v 0 disables bitrate target so CQ drives it.
+/// Run the probe against every candidate, returning all results so the caller can
+/// surface them to the user log. Order matches encoder preference.
+pub fn probe_all_encoders() -> Vec<(&'static str, &'static str, Result<(), String>)> {
+    const CANDIDATES: &[(&str, &str)] = &[
         ("h264_nvenc", "-preset p4 -rc vbr -cq 23 -b:v 0"),
-        // Intel QuickSync
         ("h264_qsv", "-preset medium -global_quality 23 -look_ahead 1"),
-        // AMD
         ("h264_amf", "-quality balanced -rc cqp -qp_i 22 -qp_p 22"),
-        // macOS VideoToolbox. -q:v on VT is 0..100, ~55 is a good default.
         ("h264_videotoolbox", "-q:v 55"),
     ];
-    for (name, args) in candidates {
-        if probe_encoder(name) {
-            tracing::info!("Hardware encoder detected: {name}");
-            return (name, args);
+    CANDIDATES
+        .iter()
+        .map(|(name, args)| (*name, *args, probe_encoder(name)))
+        .collect()
+}
+
+fn pick_encoder(probes: &[(&'static str, &'static str, Result<(), String>)]) -> (&'static str, &'static str) {
+    for (name, args, result) in probes {
+        if result.is_ok() {
+            return (*name, *args);
         }
     }
-    tracing::info!("No hardware encoder detected; falling back to libx264");
     ("libx264", "-crf 18 -preset fast")
 }
 
 /// Probe whether an encoder is usable by doing a tiny test encode. `-encoders` only
 /// tells us the encoder is compiled in, not that the driver/device is actually present.
-fn probe_encoder(name: &str) -> bool {
+/// Returns Ok(()) on success, or Err with a short reason so the startup log can
+/// explain why a hardware encoder was skipped.
+fn probe_encoder(name: &str) -> Result<(), String> {
+    // 1 second at 25 fps → 25 frames at 256x256. Larger than NVENC's 48x48 min and
+    // produces enough frames that any encoder that's going to work will accept it.
     let result = crate::media::ffmpeg_command()
         .args(["-hide_banner", "-loglevel", "error"])
-        .args(["-f", "lavfi", "-i", "testsrc=duration=0.1:size=64x64:rate=1"])
+        .args(["-f", "lavfi", "-i", "testsrc=duration=1:size=256x256:rate=25"])
         .args(["-c:v", name])
         .args(["-f", "null", "-"])
         .output();
-    match result {
-        Ok(out) => out.status.success(),
-        Err(_) => false,
+    let out = result.map_err(|e| format!("spawn failed: {e}"))?;
+    if out.status.success() {
+        return Ok(());
     }
+    // ffmpeg emits the actual reason on stderr — capture its first meaningful line.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let reason = stderr
+        .lines()
+        .find(|l| !l.trim().is_empty() && !l.contains("Conversion failed") && !l.contains("Error opening output"))
+        .unwrap_or("unknown error")
+        .trim()
+        .to_string();
+    Err(reason)
 }
 
 /// Human-readable name of the detected transcode encoder (for startup log).

@@ -1057,37 +1057,82 @@
                 }
                 const m = await resp.json();
 
-                const art = m.has_art ? apiUrl('/api/movies/' + m.id + '/art')
-                          : m.has_backdrop ? apiUrl('/api/movies/' + m.id + '/backdrop')
-                          : null;
+                const heroImage = m.has_backdrop
+                    ? `<img src="${apiUrl('/api/movies/' + m.id + '/backdrop')}">`
+                    : m.has_art
+                        ? `<img src="${apiUrl('/api/movies/' + m.id + '/art')}" style="filter: blur(10px); transform: scale(1.1);">`
+                        : `<div style="width:100%;height:100%;background:#111;"></div>`;
+
                 const progressBit = m.progress && !m.progress.completed && m.progress.duration_secs > 0
-                    ? `<div style="font-size:12px;color:#888;margin-top:6px;">Resumes at ${Math.floor(m.progress.position_secs / 60)} min of ${Math.floor(m.progress.duration_secs / 60)} min</div>`
-                    : (m.progress && m.progress.completed ? '<div style="font-size:12px;color:#34c759;margin-top:6px;">✓ Watched</div>' : '');
+                    ? `<div class="ep-badge progress-badge" style="display:inline-block;">▶ ${Math.round(m.progress.position_secs / m.progress.duration_secs * 100)}% watched</div>`
+                    : (m.progress && m.progress.completed ? '<div class="ep-badge watched-badge" style="display:inline-block;">✓ Watched</div>' : '');
+
+                const metaBits = [];
+                if (m.year) metaBits.push(esc(m.year));
+                if (m.runtime_minutes) metaBits.push(`${m.runtime_minutes} min`);
+                if (m.genres) metaBits.push(esc(m.genres));
+                if (m.rating) metaBits.push(`<span class="rating">★ ${m.rating.toFixed(1)}</span>`);
+                metaBits.push(`${formatBytes(m.size_bytes)}`);
 
                 content.innerHTML = `
-                    <div class="detail-header">
-                        ${art ? `<img class="detail-art" src="${art}">` : ''}
-                        <div class="detail-info">
-                            <div class="detail-title">${esc(m.title)}</div>
-                            ${m.tagline ? `<div style="font-style:italic;color:#aaa;margin-bottom:8px;">${esc(m.tagline)}</div>` : ''}
-                            <div class="detail-meta">
-                                ${m.year ? `<span>${m.year}</span>` : ''}
-                                ${m.rating ? `<span class="rating">★ ${m.rating.toFixed(1)}</span>` : ''}
-                                ${m.runtime_minutes ? `<span>${m.runtime_minutes} min</span>` : ''}
-                                ${m.genres ? `<span>${esc(m.genres)}</span>` : ''}
+                    <div class="detail-hero" style="position: relative;">
+                        <button class="detail-close" onclick="closeDetail()">✕</button>
+                        ${heroImage}
+                        <div class="detail-hero-gradient"></div>
+                        <div class="detail-hero-info">
+                            <div class="detail-hero-left">
+                                <div class="detail-hero-title">${esc(m.title)}</div>
+                                ${m.tagline ? `<div style="font-style:italic;color:#ccc;margin-top:6px;text-shadow:0 1px 4px rgba(0,0,0,0.5);">${esc(m.tagline)}</div>` : ''}
+                                <div class="detail-hero-meta">${metaBits.join(' · ')}</div>
                             </div>
-                            ${m.overview ? `<div class="detail-overview">${esc(m.overview)}</div>` : ''}
-                            ${progressBit}
-                            <div style="display:flex;gap:10px;margin-top:16px;">
-                                <button class="action-btn" onclick="playMovie('${esc(m.path)}')">▶ Play</button>
-                                <button class="action-btn danger" onclick="deleteMovie('${esc(m.id)}', '${esc(m.title)}')">🗑 Delete</button>
-                            </div>
+                            ${m.overview ? `<div class="detail-hero-overview">${esc(m.overview)}</div>` : ''}
                         </div>
+                    </div>
+                    <div class="detail-body">
+                        <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap;align-items:center;">
+                            <button class="action-btn" onclick="playMovie('${esc(m.path)}')">▶ Play</button>
+                            <button class="action-btn" onclick="refreshMovieMetadata('${esc(m.id)}', this)">🔄 Refresh Metadata</button>
+                            ${m.progress ? `<button class="action-btn danger" onclick="resetMovieProgress('${esc(m.id)}', this)">↩ Reset Progress</button>` : ''}
+                            <button class="action-btn danger" onclick="deleteMovie('${esc(m.id)}', '${esc(m.title)}')">🗑 Delete Movie</button>
+                            <div style="margin-left:auto;">${progressBit}</div>
+                        </div>
+                        <div style="font-size:11px;color:#666;font-family:monospace;">${esc(m.path)}</div>
                     </div>
                 `;
                 overlay.classList.add('active');
             } catch (e) {
                 showToast('Could not load movie', String(e), 'error');
+            }
+        }
+
+        async function refreshMovieMetadata(movieId, btn) {
+            btn.disabled = true;
+            const original = btn.textContent;
+            btn.textContent = '🔄 Refreshing...';
+            try {
+                // Clear the "given up" flag and trigger a full TMDB refresh
+                await fetch(apiUrl('/api/metadata/retry/' + encodeURIComponent(movieId)), { method: 'POST' });
+                await fetch(apiUrl('/api/metadata/fetch'), { method: 'POST' });
+                showToast('Metadata refresh requested', 'The server will re-fetch on the next scan cycle.', 'success');
+                setTimeout(() => showMovieDetail(movieId), 1500);
+            } catch (e) {
+                showToast('Refresh failed', String(e), 'error');
+                btn.disabled = false;
+                btn.textContent = original;
+            }
+        }
+
+        async function resetMovieProgress(movieId, btn) {
+            const ok = await showConfirm('Reset watch progress?', 'This movie will be marked as unwatched.', 'Reset');
+            if (!ok) return;
+            btn.disabled = true;
+            try {
+                await fetch(apiUrl('/api/movies/' + encodeURIComponent(movieId) + '/progress'), { method: 'DELETE' });
+                showToast('Progress cleared', '', 'success');
+                showMovieDetail(movieId);
+            } catch (e) {
+                showToast('Could not clear progress', String(e), 'error');
+                btn.disabled = false;
             }
         }
 

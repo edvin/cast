@@ -601,8 +601,36 @@ pub fn needs_remux(path: &std::path::Path) -> bool {
 /// Preferred H.264 encoder for transcoding. Detected once on first access via a short
 /// probe encode against each hardware encoder, falling back to libx264. Order: NVENC
 /// (NVIDIA) → QSV (Intel) → AMF (AMD) → VideoToolbox (macOS) → libx264 (software).
-static TRANSCODE_ENCODER: std::sync::LazyLock<(&'static str, &'static str)> =
-    std::sync::LazyLock::new(|| pick_encoder(&probe_all_encoders()));
+///
+/// Can be overridden via the CAST_ENCODER env var:
+///   auto (default) | nvenc | qsv | amf | videotoolbox | libx264 | software
+static TRANSCODE_ENCODER: std::sync::LazyLock<(&'static str, &'static str)> = std::sync::LazyLock::new(|| {
+    let probes = probe_all_encoders();
+    let override_value = std::env::var("CAST_ENCODER").ok().map(|s| s.trim().to_lowercase());
+    match override_value.as_deref() {
+        Some("auto") | Some("") | None => pick_encoder(&probes),
+        Some("software") | Some("libx264") => ("libx264", "-crf 18 -preset fast"),
+        Some(other) => {
+            let full_name = match other {
+                "nvenc" | "h264_nvenc" => "h264_nvenc",
+                "qsv" | "h264_qsv" => "h264_qsv",
+                "amf" | "h264_amf" => "h264_amf",
+                "videotoolbox" | "vt" | "h264_videotoolbox" => "h264_videotoolbox",
+                _ => {
+                    tracing::warn!("Unknown CAST_ENCODER '{other}', falling back to auto");
+                    return pick_encoder(&probes);
+                }
+            };
+            if let Some(found) = probes.iter().find(|(n, _, r)| *n == full_name && r.is_ok()) {
+                tracing::info!("CAST_ENCODER override: using {full_name}");
+                (found.0, found.1)
+            } else {
+                tracing::warn!("CAST_ENCODER={other} requested but probe failed; falling back to auto");
+                pick_encoder(&probes)
+            }
+        }
+    }
+});
 
 /// Run the probe against every candidate, returning all results so the caller can
 /// surface them to the user log. Order matches encoder preference.

@@ -382,6 +382,18 @@
                 <div class="field"><label>TMDB API Key</label><input type="text" id="cfgTmdbKey" placeholder="Optional — for metadata and artwork"></div>
                 <div class="field"><label>Server Name</label><input type="text" id="cfgServerName" placeholder="Cast Server"></div>
                 <div class="field"><label>Port</label><input type="number" id="cfgPort" placeholder="3456"></div>
+                <div class="field">
+                    <label>Transcoding Encoder</label>
+                    <select id="cfgEncoder" style="width:100%; padding:8px; background:#1a1a1a; color:#e0e0e0; border:1px solid #333; border-radius:4px;">
+                        <option value="auto">Auto (detect best available)</option>
+                        <option value="nvenc">NVIDIA NVENC (h264_nvenc)</option>
+                        <option value="qsv">Intel QuickSync (h264_qsv)</option>
+                        <option value="amf">AMD AMF (h264_amf)</option>
+                        <option value="videotoolbox">Apple VideoToolbox (macOS)</option>
+                        <option value="software">Software (libx264)</option>
+                    </select>
+                    <div style="font-size:11px; color:#888; margin-top:4px;">Requires a Cast Server restart to apply.</div>
+                </div>
                 <div class="field" style="display:flex; align-items:center; gap:10px;">
                     <label style="margin:0; flex-shrink:0;">Start on login</label>
                     <input type="checkbox" id="cfgAutostart" style="width:auto;" onchange="toggleAutostart(this.checked)">
@@ -523,6 +535,7 @@
             document.getElementById('cfgTmdbKey').value = config.tmdb_key;
             document.getElementById('cfgServerName').value = config.server_name;
             document.getElementById('cfgPort').value = config.port;
+            document.getElementById('cfgEncoder').value = config.encoder || 'auto';
         }
 
         document.getElementById('saveBtn').addEventListener('click', async () => {
@@ -542,6 +555,7 @@
                 tmdb_key: document.getElementById('cfgTmdbKey').value.trim(),
                 server_name: document.getElementById('cfgServerName').value.trim() || 'Cast Server',
                 port: portValue,
+                encoder: document.getElementById('cfgEncoder').value || 'auto',
             };
             try {
                 btn.disabled = true;

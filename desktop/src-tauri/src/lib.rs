@@ -49,6 +49,14 @@ struct AppConfig {
     tmdb_key: String,
     server_name: String,
     port: u16,
+    /// Encoder override for transcoding. "auto" (probes and picks the best HW encoder)
+    /// or one of: nvenc, qsv, amf, videotoolbox, software/libx264.
+    #[serde(default = "default_encoder")]
+    encoder: String,
+}
+
+fn default_encoder() -> String {
+    "auto".to_string()
 }
 
 impl Default for AppConfig {
@@ -58,6 +66,7 @@ impl Default for AppConfig {
             tmdb_key: String::new(),
             server_name: "Cast Server".to_string(),
             port: 3456,
+            encoder: default_encoder(),
         }
     }
 }
@@ -81,6 +90,7 @@ fn load_config() -> AppConfig {
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(3456),
+        encoder: std::env::var("CAST_ENCODER").unwrap_or_else(|_| default_encoder()),
     }
 }
 
@@ -112,6 +122,9 @@ fn save_config_to_env(config: &AppConfig) -> Result<(), String> {
         content += &format!("CAST_SERVER_NAME={}\n", env_quote(&config.server_name));
     }
     content += &format!("CAST_PORT={}\n", config.port);
+    if !config.encoder.is_empty() && config.encoder != "auto" {
+        content += &format!("CAST_ENCODER={}\n", env_quote(&config.encoder));
+    }
     std::fs::write(&env_path, content).map_err(|e| e.to_string())?;
     Ok(())
 }

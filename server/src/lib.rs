@@ -183,13 +183,17 @@ pub async fn start_server(
     let initial_tmdb_work: Option<Vec<TmdbFetchEntry>> = tmdb_client.as_ref().map(|_| {
         lib.series
             .values()
-            .filter(|s| s.art.is_none() || s.backdrop.is_none() || db.get_series_metadata(&s.id).is_none())
+            .filter(|s| {
+                let has_art = s.art.is_some() || db.has_artwork(&s.id, "art");
+                let has_backdrop = s.backdrop.is_some() || db.has_artwork(&s.id, "backdrop");
+                !has_art || !has_backdrop || db.get_series_metadata(&s.id).is_none()
+            })
             .map(|s| {
                 (
                     s.id.clone(),
                     s.title.clone(),
-                    s.art.is_some(),
-                    s.backdrop.is_some(),
+                    s.art.is_some() || db.has_artwork(&s.id, "art"),
+                    s.backdrop.is_some() || db.has_artwork(&s.id, "backdrop"),
                     s.tmdb_id_override,
                 )
             })
@@ -200,14 +204,18 @@ pub async fn start_server(
     let initial_movie_tmdb_work: Option<Vec<tmdb::MovieFetchEntry>> = tmdb_client.as_ref().map(|_| {
         lib.movies
             .values()
-            .filter(|m| m.art.is_none() || m.backdrop.is_none() || db.get_movie_metadata(&m.id).is_none())
+            .filter(|m| {
+                let has_art = m.art.is_some() || db.has_artwork(&m.id, "art");
+                let has_backdrop = m.backdrop.is_some() || db.has_artwork(&m.id, "backdrop");
+                !has_art || !has_backdrop || db.get_movie_metadata(&m.id).is_none()
+            })
             .map(|m| tmdb::MovieFetchEntry {
                 movie_id: m.id.clone(),
                 title: m.title.clone(),
                 year: m.year.clone(),
                 video_path: std::path::PathBuf::from(&m.path),
-                has_art: m.art.is_some(),
-                has_backdrop: m.backdrop.is_some(),
+                has_art: m.art.is_some() || db.has_artwork(&m.id, "art"),
+                has_backdrop: m.backdrop.is_some() || db.has_artwork(&m.id, "backdrop"),
                 tmdb_id_override: m.tmdb_id_override,
             })
             .collect()
@@ -323,16 +331,17 @@ pub async fn start_server(
                             .series
                             .values()
                             .filter(|s| {
-                                s.art.is_none()
-                                    || s.backdrop.is_none()
-                                    || rescan_state.db.get_series_metadata(&s.id).is_none()
+                                let has_art = s.art.is_some() || rescan_state.db.has_artwork(&s.id, "art");
+                                let has_backdrop =
+                                    s.backdrop.is_some() || rescan_state.db.has_artwork(&s.id, "backdrop");
+                                !has_art || !has_backdrop || rescan_state.db.get_series_metadata(&s.id).is_none()
                             })
                             .map(|s| {
                                 (
                                     s.id.clone(),
                                     s.title.clone(),
-                                    s.art.is_some(),
-                                    s.backdrop.is_some(),
+                                    s.art.is_some() || rescan_state.db.has_artwork(&s.id, "art"),
+                                    s.backdrop.is_some() || rescan_state.db.has_artwork(&s.id, "backdrop"),
                                     s.tmdb_id_override,
                                 )
                             })
@@ -342,17 +351,18 @@ pub async fn start_server(
                             .movies
                             .values()
                             .filter(|m| {
-                                m.art.is_none()
-                                    || m.backdrop.is_none()
-                                    || rescan_state.db.get_movie_metadata(&m.id).is_none()
+                                let has_art = m.art.is_some() || rescan_state.db.has_artwork(&m.id, "art");
+                                let has_backdrop =
+                                    m.backdrop.is_some() || rescan_state.db.has_artwork(&m.id, "backdrop");
+                                !has_art || !has_backdrop || rescan_state.db.get_movie_metadata(&m.id).is_none()
                             })
                             .map(|m| tmdb::MovieFetchEntry {
                                 movie_id: m.id.clone(),
                                 title: m.title.clone(),
                                 year: m.year.clone(),
                                 video_path: std::path::PathBuf::from(&m.path),
-                                has_art: m.art.is_some(),
-                                has_backdrop: m.backdrop.is_some(),
+                                has_art: m.art.is_some() || rescan_state.db.has_artwork(&m.id, "art"),
+                                has_backdrop: m.backdrop.is_some() || rescan_state.db.has_artwork(&m.id, "backdrop"),
                                 tmdb_id_override: m.tmdb_id_override,
                             })
                             .collect();

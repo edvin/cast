@@ -124,6 +124,24 @@ impl Database {
                 rating REAL,
                 tagline TEXT,
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS tmdb_lookup_attempts (
+                content_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                last_attempt_at TEXT NOT NULL DEFAULT (datetime('now')),
+                given_up INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS artwork (
+                content_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                bytes BLOB NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (content_id, kind)
             );",
         )?;
 
@@ -484,6 +502,159 @@ impl Database {
         let _ = conn.execute("DELETE FROM movie_metadata WHERE movie_id = ?1", params![movie_id]);
     }
 
+    // --- TMDB lookup attempt tracking ---
+
+    /// Record a failed TMDB lookup attempt and flip `given_up` once the attempt count
+    /// crosses `max_attempts`. Kind is "series" or "movie".
+    pub fn record_tmdb_failure(&self, content_id: &str, kind: &str, error: &str, max_attempts: i64) -> TmdbLookupState {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "INSERT INTO tmdb_lookup_attempts (content_id, kind, attempts, last_error, last_attempt_at, given_up)
+             VALUES (?1, ?2, 1, ?3, datetime('now'), 0)
+             ON CONFLICT(content_id) DO UPDATE SET
+                 kind = excluded.kind,
+                 attempts = attempts + 1,
+                 last_error = excluded.last_error,
+                 last_attempt_at = excluded.last_attempt_at",
+            params![content_id, kind, error],
+        );
+        let attempts: i64 = conn
+            .query_row(
+                "SELECT attempts FROM tmdb_lookup_attempts WHERE content_id = ?1",
+                params![content_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let given_up = attempts >= max_attempts;
+        if given_up {
+            let _ = conn.execute(
+                "UPDATE tmdb_lookup_attempts SET given_up = 1 WHERE content_id = ?1",
+                params![content_id],
+            );
+        }
+        TmdbLookupState {
+            attempts: attempts as u32,
+            given_up,
+        }
+    }
+
+    /// On a successful match, drop the attempt row so a future regression retries cleanly.
+    pub fn clear_tmdb_failure(&self, content_id: &str) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "DELETE FROM tmdb_lookup_attempts WHERE content_id = ?1",
+            params![content_id],
+        );
+    }
+
+    pub fn is_tmdb_lookup_abandoned(&self, content_id: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT given_up FROM tmdb_lookup_attempts WHERE content_id = ?1",
+            params![content_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|v| v != 0)
+        .unwrap_or(false)
+    }
+
+    /// Clear all abandoned TMDB lookup flags (user-triggered "retry all metadata").
+    pub fn retry_tmdb_lookups(&self) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute("DELETE FROM tmdb_lookup_attempts", []);
+    }
+
+    pub fn list_tmdb_failures(&self) -> Vec<TmdbLookupFailure> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT content_id, kind, attempts, last_error, last_attempt_at, given_up
+             FROM tmdb_lookup_attempts ORDER BY given_up DESC, last_attempt_at DESC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let iter = stmt.query_map([], |row| {
+            Ok(TmdbLookupFailure {
+                content_id: row.get(0)?,
+                kind: row.get(1)?,
+                attempts: row.get::<_, i64>(2)? as u32,
+                last_error: row.get(3)?,
+                last_attempt_at: row.get(4)?,
+                given_up: row.get::<_, i64>(5)? != 0,
+            })
+        });
+        match iter {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    // --- Artwork (poster/backdrop) BLOB storage ---
+
+    /// Store poster or backdrop bytes for a content item. `kind` is "art" or "backdrop".
+    pub fn save_artwork(
+        &self,
+        content_id: &str,
+        kind: &str,
+        content_type: &str,
+        bytes: &[u8],
+    ) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO artwork (content_id, kind, content_type, bytes, updated_at)
+             VALUES (?1, ?2, ?3, ?4, datetime('now'))
+             ON CONFLICT(content_id, kind) DO UPDATE SET
+                 content_type = excluded.content_type,
+                 bytes = excluded.bytes,
+                 updated_at = excluded.updated_at",
+            params![content_id, kind, content_type, bytes],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_artwork(&self, content_id: &str, kind: &str) -> Option<(String, Vec<u8>)> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT content_type, bytes FROM artwork WHERE content_id = ?1 AND kind = ?2",
+            params![content_id, kind],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .ok()
+    }
+
+    pub fn has_artwork(&self, content_id: &str, kind: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT 1 FROM artwork WHERE content_id = ?1 AND kind = ?2",
+            params![content_id, kind],
+            |_row| Ok(()),
+        )
+        .is_ok()
+    }
+
+    pub fn delete_artwork(&self, content_id: &str) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute("DELETE FROM artwork WHERE content_id = ?1", params![content_id]);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TmdbLookupState {
+    pub attempts: u32,
+    pub given_up: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TmdbLookupFailure {
+    pub content_id: String,
+    pub kind: String,
+    pub attempts: u32,
+    pub last_error: Option<String>,
+    pub last_attempt_at: String,
+    pub given_up: bool,
+}
+
+impl Database {
     // --- Remux failure tracking ---
 
     /// Record a failed remux attempt, incrementing the attempt counter and flipping

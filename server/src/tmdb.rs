@@ -539,6 +539,20 @@ impl TmdbClient {
         Ok(())
     }
 
+    /// Fetch the raw bytes + content type of an image. Used when we're storing
+    /// artwork in the database instead of on the filesystem.
+    pub async fn fetch_image_bytes(&self, url: &str) -> Result<(String, Vec<u8>), Box<dyn std::error::Error>> {
+        let resp = self.http.get(url).send().await?;
+        let ct = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("image/jpeg")
+            .to_string();
+        let bytes = resp.bytes().await?.to_vec();
+        Ok((ct, bytes))
+    }
+
     /// Download a poster image and save it to the series directory
     pub async fn download_poster(&self, series_dir: &Path, poster_url: &str) -> Result<(), Box<dyn std::error::Error>> {
         let ext = image_extension(poster_url);
@@ -618,14 +632,21 @@ pub struct MovieFetchEntry {
 pub async fn fetch_all_movies_metadata(
     client: &TmdbClient,
     db: &crate::db::Database,
-    media_root: &Path,
+    _media_root: &Path,
     movies: Vec<MovieFetchEntry>,
     log: impl Fn(&str),
 ) -> usize {
     let mut downloaded = 0;
     let total = movies.len();
+    let mut skipped_abandoned = 0u32;
     for (i, entry) in movies.into_iter().enumerate() {
-        if db.get_movie_metadata(&entry.movie_id).is_some() && entry.has_art && entry.has_backdrop {
+        let has_db_art = entry.has_art || db.has_artwork(&entry.movie_id, "art");
+        let has_db_backdrop = entry.has_backdrop || db.has_artwork(&entry.movie_id, "backdrop");
+        if db.get_movie_metadata(&entry.movie_id).is_some() && has_db_art && has_db_backdrop {
+            continue;
+        }
+        if entry.tmdb_id_override.is_none() && db.is_tmdb_lookup_abandoned(&entry.movie_id) {
+            skipped_abandoned += 1;
             continue;
         }
 
@@ -644,6 +665,8 @@ pub async fn fetch_all_movies_metadata(
 
         match search_result {
             Ok(Some(info)) => {
+                db.clear_tmdb_failure(&entry.movie_id);
+
                 let meta = crate::db::MovieMetadata {
                     movie_id: entry.movie_id.clone(),
                     tmdb_id: Some(info.tmdb_id),
@@ -665,108 +688,112 @@ pub async fn fetch_all_movies_metadata(
                     log(&m);
                 }
 
-                // Pick art destination. If the video is in its own folder (the folder
-                // contains only videos/subs/art, not other movies), write `.poster.jpg`
-                // next to it. Otherwise use a stem-prefixed filename.
-                let abs_video = media_root.join(&entry.video_path);
-                let parent = match abs_video.parent() {
-                    Some(p) => p.to_path_buf(),
-                    None => continue,
-                };
-                let stem = abs_video.file_stem().unwrap_or_default().to_string_lossy().to_string();
-                let folder_is_movie_folder = is_single_movie_folder(&parent, media_root);
-
-                if !entry.has_art {
+                if !has_db_art {
                     if let Some(ref url) = info.poster_url {
-                        let ext = image_extension(url);
-                        let dest = if folder_is_movie_folder {
-                            parent.join(format!(".poster.{ext}"))
-                        } else {
-                            parent.join(format!("{stem}-poster.{ext}"))
-                        };
-                        if let Err(e) = client.download_image(url, &dest).await {
-                            let m = format!("Failed to download poster for '{}': {e}", entry.title);
-                            tracing::warn!("{m}");
-                            log(&m);
-                        } else {
-                            downloaded += 1;
+                        match client.fetch_image_bytes(url).await {
+                            Ok((ct, bytes)) => {
+                                if let Err(e) = db.save_artwork(&entry.movie_id, "art", &ct, &bytes) {
+                                    let m = format!("Failed to save poster for '{}': {e}", entry.title);
+                                    tracing::warn!("{m}");
+                                    log(&m);
+                                } else {
+                                    downloaded += 1;
+                                }
+                            }
+                            Err(e) => {
+                                let m = format!("Failed to fetch poster for '{}': {e}", entry.title);
+                                tracing::warn!("{m}");
+                                log(&m);
+                            }
                         }
                     }
                 }
 
-                if !entry.has_backdrop {
+                if !has_db_backdrop {
                     if let Some(ref url) = info.backdrop_url {
-                        let ext = image_extension(url);
-                        let dest = if folder_is_movie_folder {
-                            parent.join(format!(".backdrop.{ext}"))
-                        } else {
-                            parent.join(format!("{stem}-backdrop.{ext}"))
-                        };
-                        if let Err(e) = client.download_image(url, &dest).await {
-                            let m = format!("Failed to download backdrop for '{}': {e}", entry.title);
-                            tracing::warn!("{m}");
-                            log(&m);
+                        match client.fetch_image_bytes(url).await {
+                            Ok((ct, bytes)) => {
+                                if let Err(e) = db.save_artwork(&entry.movie_id, "backdrop", &ct, &bytes) {
+                                    let m = format!("Failed to save backdrop for '{}': {e}", entry.title);
+                                    tracing::warn!("{m}");
+                                    log(&m);
+                                }
+                            }
+                            Err(e) => {
+                                let m = format!("Failed to fetch backdrop for '{}': {e}", entry.title);
+                                tracing::warn!("{m}");
+                                log(&m);
+                            }
                         }
                     }
                 }
             }
             Ok(None) => {
-                let m = format!("No TMDB movie match for '{}'", entry.title);
-                tracing::info!("{m}");
-                log(&m);
+                let state = db.record_tmdb_failure(&entry.movie_id, "movie", "no TMDB match", MAX_TMDB_LOOKUP_ATTEMPTS);
+                if state.given_up {
+                    let m = format!(
+                        "Giving up on '{}' after {} TMDB lookup attempts — add tmdb.txt with the movie ID or click Retry",
+                        entry.title, state.attempts
+                    );
+                    tracing::info!("{m}");
+                    log(&m);
+                } else {
+                    let m = format!(
+                        "No TMDB match for '{}' (attempt {}/{MAX_TMDB_LOOKUP_ATTEMPTS})",
+                        entry.title, state.attempts
+                    );
+                    tracing::info!("{m}");
+                    log(&m);
+                }
             }
             Err(e) => {
-                let m = format!("TMDB movie search failed for '{}': {e}", entry.title);
+                let state = db.record_tmdb_failure(&entry.movie_id, "movie", &format!("{e}"), MAX_TMDB_LOOKUP_ATTEMPTS);
+                let m = format!(
+                    "TMDB movie search failed for '{}' (attempt {}/{MAX_TMDB_LOOKUP_ATTEMPTS}): {e}",
+                    entry.title, state.attempts
+                );
                 tracing::warn!("{m}");
                 log(&m);
             }
         }
     }
+    if skipped_abandoned > 0 {
+        log(&format!(
+            "Skipped {skipped_abandoned} movie(s) previously given up on — use Retry Metadata to try again"
+        ));
+    }
     downloaded
 }
 
-/// Is `dir` a "single movie folder" (a folder whose sole purpose is one movie)?
-/// Used to decide whether to drop `.poster.jpg`/`.backdrop.jpg` into the folder
-/// (movie folder) or use stem-prefixed names (shared organizational folder).
-fn is_single_movie_folder(dir: &Path, media_root: &Path) -> bool {
-    // Walk the immediate children. If there's exactly one video file, we treat it
-    // as a movie folder. Multiple videos → organizational folder, use stem prefix.
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return false,
-    };
-    let mut video_count = 0;
-    for entry in entries.filter_map(|e| e.ok()) {
-        let p = entry.path();
-        if p.is_file() {
-            let ext = p.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase());
-            if matches!(ext.as_deref(), Some("mp4" | "m4v" | "mov" | "mkv" | "avi" | "webm")) {
-                video_count += 1;
-                if video_count > 1 {
-                    return false;
-                }
-            }
-        }
-    }
-    // Don't treat the media root or the Films/Movies container itself as a movie folder
-    dir != media_root && video_count == 1
-}
+/// Max lookup attempts before we flag a series/movie as "given up" and stop
+/// re-querying TMDB for it every rescan cycle. User can clear the flag via
+/// POST /api/metadata/retry.
+pub const MAX_TMDB_LOOKUP_ATTEMPTS: i64 = 3;
 
 /// Fetch metadata for all series, download art, and store metadata in DB.
 /// `log` is invoked for per-series progress so it shows up in the desktop UI log.
 pub async fn fetch_all_metadata(
     client: &TmdbClient,
     db: &crate::db::Database,
-    media_root: &Path,
+    _media_root: &Path,
     series_list: Vec<(String, String, bool, bool, Option<u64>)>, // (series_id, folder_name, has_art, has_backdrop, tmdb_id_override)
     log: impl Fn(&str),
 ) -> usize {
     let mut downloaded = 0;
 
     let total = series_list.len();
+    let mut skipped_abandoned = 0u32;
     for (i, (series_id, title, has_art, has_backdrop, tmdb_id_override)) in series_list.into_iter().enumerate() {
+        let has_db_art = has_art || db.has_artwork(&series_id, "art");
+        let has_db_backdrop = has_backdrop || db.has_artwork(&series_id, "backdrop");
         // Check if we already have metadata, art, and backdrop
-        if db.get_series_metadata(&series_id).is_some() && has_art && has_backdrop {
+        if db.get_series_metadata(&series_id).is_some() && has_db_art && has_db_backdrop {
+            continue;
+        }
+        // Skip items the user has given up on (unless they've added a tmdb.txt override,
+        // which is an explicit signal to try again).
+        if tmdb_id_override.is_none() && db.is_tmdb_lookup_abandoned(&series_id) {
+            skipped_abandoned += 1;
             continue;
         }
 
@@ -800,6 +827,8 @@ pub async fn fetch_all_metadata(
 
         match search_result {
             Ok(Some(info)) => {
+                db.clear_tmdb_failure(&series_id);
+
                 // Save series metadata to DB
                 let meta = crate::db::SeriesMetadata {
                     series_id: series_id.clone(),
@@ -820,29 +849,44 @@ pub async fn fetch_all_metadata(
                     log(&msg);
                 }
 
-                // Download poster if missing
-                if !has_art {
+                // Poster: save into DB as BLOB (no more littering the filesystem)
+                if !has_db_art {
                     if let Some(ref poster_url) = info.poster_url {
-                        let series_dir = media_root.join(&title);
-                        if let Err(e) = client.download_poster(&series_dir, poster_url).await {
-                            let msg = format!("Failed to download poster for '{title}': {e}");
-                            tracing::warn!("{msg}");
-                            log(&msg);
-                        } else {
-                            downloaded += 1;
+                        match client.fetch_image_bytes(poster_url).await {
+                            Ok((ct, bytes)) => {
+                                if let Err(e) = db.save_artwork(&series_id, "art", &ct, &bytes) {
+                                    let msg = format!("Failed to save poster for '{title}': {e}");
+                                    tracing::warn!("{msg}");
+                                    log(&msg);
+                                } else {
+                                    downloaded += 1;
+                                }
+                            }
+                            Err(e) => {
+                                let msg = format!("Failed to fetch poster for '{title}': {e}");
+                                tracing::warn!("{msg}");
+                                log(&msg);
+                            }
                         }
                     }
                 }
 
-                // Download backdrop if missing
-                if let Some(ref backdrop_url) = info.backdrop_url {
-                    let backdrop_path = media_root.join(&title).join(".backdrop.jpg");
-                    let legacy_path = media_root.join(&title).join("backdrop.jpg");
-                    if !backdrop_path.exists() && !legacy_path.exists() {
-                        if let Err(e) = client.download_backdrop(&media_root.join(&title), backdrop_url).await {
-                            let msg = format!("Failed to download backdrop for '{title}': {e}");
-                            tracing::warn!("{msg}");
-                            log(&msg);
+                // Backdrop: same — save into DB
+                if !has_db_backdrop {
+                    if let Some(ref backdrop_url) = info.backdrop_url {
+                        match client.fetch_image_bytes(backdrop_url).await {
+                            Ok((ct, bytes)) => {
+                                if let Err(e) = db.save_artwork(&series_id, "backdrop", &ct, &bytes) {
+                                    let msg = format!("Failed to save backdrop for '{title}': {e}");
+                                    tracing::warn!("{msg}");
+                                    log(&msg);
+                                }
+                            }
+                            Err(e) => {
+                                let msg = format!("Failed to fetch backdrop for '{title}': {e}");
+                                tracing::warn!("{msg}");
+                                log(&msg);
+                            }
                         }
                     }
                 }
@@ -853,7 +897,7 @@ pub async fn fetch_all_metadata(
                         Ok(episodes) => {
                             for ep in episodes {
                                 let ep_meta = crate::db::EpisodeMetadata {
-                                    episode_id: String::new(), // Will be matched later
+                                    episode_id: String::new(),
                                     series_id: series_id.clone(),
                                     tmdb_episode_id: Some(ep.tmdb_episode_id),
                                     season_number: Some(ep.season_number),
@@ -882,16 +926,38 @@ pub async fn fetch_all_metadata(
                 tracing::info!("Fetched metadata for '{title}' (TMDB ID: {})", info.tmdb_id);
             }
             Ok(None) => {
-                let msg = format!("No TMDB match for '{title}' (check folder name or add tmdb.txt)");
-                tracing::info!("{msg}");
-                log(&msg);
+                let reason = "no TMDB match";
+                let state = db.record_tmdb_failure(&series_id, "series", reason, MAX_TMDB_LOOKUP_ATTEMPTS);
+                if state.given_up {
+                    let msg = format!("Giving up on '{title}' after {} TMDB lookup attempts — add tmdb.txt with the series ID or click Retry to try again", state.attempts);
+                    tracing::info!("{msg}");
+                    log(&msg);
+                } else {
+                    let msg = format!(
+                        "No TMDB match for '{title}' (attempt {}/{MAX_TMDB_LOOKUP_ATTEMPTS})",
+                        state.attempts
+                    );
+                    tracing::info!("{msg}");
+                    log(&msg);
+                }
             }
             Err(e) => {
-                let msg = format!("TMDB search failed for '{title}': {e}");
+                let reason = format!("{e}");
+                let state = db.record_tmdb_failure(&series_id, "series", &reason, MAX_TMDB_LOOKUP_ATTEMPTS);
+                let msg = format!(
+                    "TMDB search failed for '{title}' (attempt {}/{MAX_TMDB_LOOKUP_ATTEMPTS}): {e}",
+                    state.attempts
+                );
                 tracing::warn!("{msg}");
                 log(&msg);
             }
         }
+    }
+
+    if skipped_abandoned > 0 {
+        log(&format!(
+            "Skipped {skipped_abandoned} series previously given up on — use Retry Metadata to try again"
+        ));
     }
 
     downloaded

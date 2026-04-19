@@ -100,6 +100,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/remux/failures", get(get_remux_failures))
         .route("/api/remux/retry", post(retry_all_remux_failures))
         .route("/api/remux/retry/{episode_id}", post(retry_one_remux_failure))
+        // TMDB lookup retry
+        .route("/api/metadata/failures", get(get_tmdb_failures))
+        .route("/api/metadata/retry", post(retry_all_tmdb_lookups))
+        .route("/api/metadata/retry/{content_id}", post(retry_one_tmdb_lookup))
         // Movies
         .route("/api/movies", get(list_movies))
         .route("/api/movies/{movie_id}", get(get_movie))
@@ -139,6 +143,31 @@ async fn retry_one_remux_failure(
 ) -> Json<RetryResponse> {
     state.db.retry_remux_failures(Some(&episode_id));
     state.log(&format!("Cleared remux failure for episode {episode_id}"));
+    Json(RetryResponse { cleared: true })
+}
+
+// --- TMDB lookup retry ---
+
+async fn get_tmdb_failures(State(state): State<Arc<AppState>>) -> Json<Vec<crate::db::TmdbLookupFailure>> {
+    Json(state.db.list_tmdb_failures())
+}
+
+async fn retry_all_tmdb_lookups(State(state): State<Arc<AppState>>) -> Json<RetryResponse> {
+    state.db.retry_tmdb_lookups();
+    state.log("Cleared all TMDB lookup failure flags — items will be retried on the next scan");
+    // Kick a rescan immediately so the UI sees the effect without waiting 60s
+    if let Ok(lib) = crate::library::Library::scan(&state.media_path) {
+        *state.library.write().await = lib;
+    }
+    Json(RetryResponse { cleared: true })
+}
+
+async fn retry_one_tmdb_lookup(
+    State(state): State<Arc<AppState>>,
+    Path(content_id): Path<String>,
+) -> Json<RetryResponse> {
+    state.db.clear_tmdb_failure(&content_id);
+    state.log(&format!("Cleared TMDB lookup failure for {content_id}"));
     Json(RetryResponse { cleared: true })
 }
 
@@ -382,8 +411,8 @@ async fn list_series(State(state): State<Arc<AppState>>) -> Json<Vec<SeriesListI
                 title: meta.and_then(|m| m.title.clone()).unwrap_or_else(|| s.title.clone()),
                 folder_name: s.title.clone(),
                 episode_count: s.episodes.len(),
-                has_art: s.art.is_some(),
-                has_backdrop: s.backdrop.is_some(),
+                has_art: s.art.is_some() || state.db.has_artwork(&s.id, "art"),
+                has_backdrop: s.backdrop.is_some() || state.db.has_artwork(&s.id, "backdrop"),
                 has_metadata: meta.is_some(),
                 overview: meta.and_then(|m| m.overview.clone()),
                 genres: meta.and_then(|m| m.genres.clone()),
@@ -612,6 +641,10 @@ async fn continue_watching(State(state): State<Arc<AppState>>) -> ApiResult<Json
 }
 
 async fn get_series_art(State(state): State<Arc<AppState>>, Path(series_id): Path<String>) -> ApiResult<Response> {
+    // Prefer artwork stored in the DB; fall back to legacy filesystem files.
+    if let Some((ct, bytes)) = state.db.get_artwork(&series_id, "art") {
+        return Ok(([(header::CONTENT_TYPE, ct)], bytes).into_response());
+    }
     let lib = state.library.read().await;
     let series = lib
         .find_series(&series_id)
@@ -621,13 +654,10 @@ async fn get_series_art(State(state): State<Arc<AppState>>, Path(series_id): Pat
         .as_ref()
         .ok_or_else(|| ApiError::not_found("No artwork available for this series"))?;
     let art_path = safe_media_path(&state.media_path, art_rel)?;
-
     let content_type = mime_guess::from_path(&art_path).first_or_octet_stream().to_string();
-
     let data = tokio::fs::read(&art_path)
         .await
         .map_err(|_| ApiError::internal("Failed to read file"))?;
-
     Ok(([(header::CONTENT_TYPE, content_type)], data).into_response())
 }
 
@@ -1226,6 +1256,9 @@ async fn delete_series_progress(
 }
 
 async fn get_series_backdrop(State(state): State<Arc<AppState>>, Path(series_id): Path<String>) -> ApiResult<Response> {
+    if let Some((ct, bytes)) = state.db.get_artwork(&series_id, "backdrop") {
+        return Ok(([(header::CONTENT_TYPE, ct)], bytes).into_response());
+    }
     let lib = state.library.read().await;
     let series = lib
         .find_series(&series_id)
@@ -1235,15 +1268,12 @@ async fn get_series_backdrop(State(state): State<Arc<AppState>>, Path(series_id)
         .as_ref()
         .ok_or_else(|| ApiError::not_found("No backdrop available for this series"))?;
     let backdrop_path = safe_media_path(&state.media_path, backdrop_rel)?;
-
     let content_type = mime_guess::from_path(&backdrop_path)
         .first_or_octet_stream()
         .to_string();
-
     let data = tokio::fs::read(&backdrop_path)
         .await
         .map_err(|_| ApiError::internal("Failed to read file"))?;
-
     Ok(([(header::CONTENT_TYPE, content_type)], data).into_response())
 }
 
@@ -2056,8 +2086,10 @@ async fn delete_series(
         std::fs::remove_dir_all(&series_dir).map_err(|e| ApiError::internal(&format!("Failed to delete: {e}")))?;
     }
 
-    // Clean up DB metadata
+    // Clean up DB metadata + artwork + TMDB attempt rows
     state.db.delete_series_metadata(&series_id);
+    state.db.delete_artwork(&series_id);
+    state.db.clear_tmdb_failure(&series_id);
 
     // Rescan
     if let Ok(lib) = crate::library::Library::scan(&state.media_path) {
@@ -2171,8 +2203,8 @@ async fn list_movies(State(state): State<Arc<AppState>>) -> Json<Vec<MovieListIt
                     .or_else(|| m.year.clone()),
                 path: m.path.clone(),
                 size_bytes: m.size_bytes,
-                has_art: m.art.is_some(),
-                has_backdrop: m.backdrop.is_some(),
+                has_art: m.art.is_some() || state.db.has_artwork(&m.id, "art"),
+                has_backdrop: m.backdrop.is_some() || state.db.has_artwork(&m.id, "backdrop"),
                 has_metadata: meta.is_some(),
                 overview: meta.as_ref().and_then(|x| x.overview.clone()),
                 genres: meta.as_ref().and_then(|x| x.genres.clone()),
@@ -2230,8 +2262,8 @@ async fn get_movie(State(state): State<Arc<AppState>>, Path(movie_id): Path<Stri
             .or_else(|| m.year.clone()),
         path: m.path.clone(),
         size_bytes: m.size_bytes,
-        has_art: m.art.is_some(),
-        has_backdrop: m.backdrop.is_some(),
+        has_art: m.art.is_some() || state.db.has_artwork(&m.id, "art"),
+        has_backdrop: m.backdrop.is_some() || state.db.has_artwork(&m.id, "backdrop"),
         has_metadata: meta.is_some(),
         overview: meta.as_ref().and_then(|x| x.overview.clone()),
         genres: meta.as_ref().and_then(|x| x.genres.clone()),
@@ -2344,6 +2376,9 @@ async fn get_movie_thumbnail(State(state): State<Arc<AppState>>, Path(movie_id):
 }
 
 async fn get_movie_art(State(state): State<Arc<AppState>>, Path(movie_id): Path<String>) -> ApiResult<Response> {
+    if let Some((ct, bytes)) = state.db.get_artwork(&movie_id, "art") {
+        return Ok(([(header::CONTENT_TYPE, ct)], bytes).into_response());
+    }
     let lib = state.library.read().await;
     let m = lib
         .find_movie(&movie_id)
@@ -2361,6 +2396,9 @@ async fn get_movie_art(State(state): State<Arc<AppState>>, Path(movie_id): Path<
 }
 
 async fn get_movie_backdrop(State(state): State<Arc<AppState>>, Path(movie_id): Path<String>) -> ApiResult<Response> {
+    if let Some((ct, bytes)) = state.db.get_artwork(&movie_id, "backdrop") {
+        return Ok(([(header::CONTENT_TYPE, ct)], bytes).into_response());
+    }
     let lib = state.library.read().await;
     let m = lib
         .find_movie(&movie_id)
@@ -2646,6 +2684,8 @@ async fn delete_movie(
 
     let _ = state.db.delete_progress(&movie_id);
     state.db.delete_movie_metadata(&movie_id);
+    state.db.delete_artwork(&movie_id);
+    state.db.clear_tmdb_failure(&movie_id);
     state.db.retry_remux_failures(Some(&movie_id));
 
     if let Ok(lib) = crate::library::Library::scan(&state.media_path) {

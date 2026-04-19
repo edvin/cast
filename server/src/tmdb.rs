@@ -759,7 +759,7 @@ pub async fn fetch_all_movies_metadata(
         }
     }
     if skipped_abandoned > 0 {
-        log(&format!(
+        debug(&format!(
             "Skipped {skipped_abandoned} movie(s) previously given up on — use Retry Metadata to try again"
         ));
     }
@@ -957,7 +957,7 @@ pub async fn fetch_all_metadata(
     }
 
     if skipped_abandoned > 0 {
-        log(&format!(
+        debug(&format!(
             "Skipped {skipped_abandoned} series previously given up on — use Retry Metadata to try again"
         ));
     }

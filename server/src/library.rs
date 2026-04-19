@@ -6,6 +6,11 @@ use std::sync::LazyLock;
 use uuid::Uuid;
 
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "mkv", "avi", "webm"];
+
+/// Top-level directory names that flip a folder from "series container" to "movies
+/// container". Case-insensitive. Every video file under such a folder (flat or
+/// arbitrarily nested) is treated as a single Movie entity.
+const MOVIES_CONTAINER_NAMES: &[&str] = &["movies", "films", "film", "filmer", "filmes"];
 const ART_NAMES: &[&str] = &[
     ".poster.jpg",
     ".poster.png",
@@ -36,6 +41,29 @@ const NAMESPACE: Uuid = Uuid::from_bytes([
 pub struct Library {
     /// series_id -> Series
     pub series: BTreeMap<String, Series>,
+    /// movie_id -> Movie
+    pub movies: BTreeMap<String, Movie>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Movie {
+    pub id: String,
+    /// Display title derived from the filename or enclosing folder.
+    pub title: String,
+    /// Year parsed from the title/folder (e.g. 2010 from "Inception (2010)").
+    pub year: Option<String>,
+    /// Relative path from media root to the video file.
+    pub path: String,
+    pub filename: String,
+    pub size_bytes: u64,
+    /// Art (poster) relative path, if found next to the video or in its folder.
+    pub art: Option<String>,
+    /// Backdrop/fanart relative path, if found next to the video or in its folder.
+    pub backdrop: Option<String>,
+    /// Optional tmdb.txt override inside the movie's folder.
+    pub tmdb_id_override: Option<u64>,
+    /// External subtitle files found next to the video.
+    pub subtitles: Vec<SubtitleFile>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,6 +120,79 @@ fn is_video(path: &Path) -> bool {
         .and_then(|e| e.to_str())
         .map(|e| VIDEO_EXTENSIONS.contains(&e.to_lowercase().as_str()))
         .unwrap_or(false)
+}
+
+fn is_movies_container(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    MOVIES_CONTAINER_NAMES.iter().any(|n| *n == lower)
+}
+
+/// Extract a year (1900-2099) from a title string. Matches "(2010)", "[2010]" or
+/// " 2010 " (space-bounded). Returns the first match.
+static RE_YEAR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:[\(\[\s\.])((?:19|20)\d{2})(?:[\)\]\s\.]|$)").unwrap());
+
+fn parse_year(s: &str) -> Option<String> {
+    RE_YEAR.captures(s).map(|c| c[1].to_string())
+}
+
+/// Derive a human-readable title from a file stem or folder name. Cleans up dots,
+/// underscores, year parenthesis, scene-release tags.
+fn clean_movie_title(raw: &str) -> String {
+    let s = raw.replace(['.', '_'], " ");
+    let s = RE_YEAR.replace_all(&s, " ").to_string();
+    let s = s.trim().to_string();
+    strip_release_tags(&s).trim().to_string()
+}
+
+/// Walks a directory recursively and returns every video file found.
+fn walk_videos(root: &Path, out: &mut Vec<std::path::PathBuf>) {
+    let entries = match std::fs::read_dir(root) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if file_type.is_dir() {
+            // Skip hidden subdirs (.thumbnails, .remux, etc.)
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with('.') {
+                continue;
+            }
+            walk_videos(&path, out);
+        } else if file_type.is_file() && is_video(&path) {
+            out.push(path);
+        }
+    }
+}
+
+/// Given a video file, find a sibling art/backdrop file (either stem-prefixed
+/// like `foo.jpg` for `foo.mkv`, or a well-known name in the same directory).
+fn find_movie_art(video_path: &Path, names: &[&str]) -> Option<std::path::PathBuf> {
+    let parent = video_path.parent()?;
+    let stem = video_path.file_stem()?.to_string_lossy();
+
+    // 1. Stem-prefixed: foo.jpg / foo.png next to foo.mkv
+    for ext in ["jpg", "jpeg", "png"] {
+        let candidate = parent.join(format!("{stem}-poster.{ext}"));
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    // 2. Well-known names inside the same directory
+    for name in names {
+        let candidate = parent.join(name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Clean up a raw title extracted from a filename: replace dots/underscores with spaces,
@@ -306,11 +407,144 @@ fn find_subtitle_files(series_path: &Path, video_stem: &str, rel_path: &str) -> 
     subtitles
 }
 
+/// Scan a top-level "Films"/"Movies" folder. Every video file under it, at any depth,
+/// becomes a Movie. Mkv/mp4 siblings in the same directory are deduped to the native
+/// format. Art/backdrop come from either a sibling file (`foo-poster.jpg` next to
+/// `foo.mkv`) or a well-known name in the same directory.
+fn scan_movies_container(container_path: &Path, container_rel: &str, out: &mut BTreeMap<String, Movie>) {
+    let mut video_paths: Vec<std::path::PathBuf> = Vec::new();
+    walk_videos(container_path, &mut video_paths);
+
+    // Dedupe mkv/mp4 siblings in the same directory: same parent + same stem → keep
+    // the Apple-native container.
+    let mut best_by_key: std::collections::HashMap<(std::path::PathBuf, String), (std::path::PathBuf, u8)> =
+        std::collections::HashMap::new();
+    for path in video_paths {
+        let parent = match path.parent() {
+            Some(p) => p.to_path_buf(),
+            None => continue,
+        };
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let prio: u8 = match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_lowercase())
+            .as_deref()
+        {
+            Some("mp4") | Some("m4v") | Some("mov") => 0,
+            _ => 1,
+        };
+        let key = (parent, stem);
+        match best_by_key.get(&key) {
+            Some((_, existing)) if *existing <= prio => continue,
+            _ => {
+                best_by_key.insert(key, (path, prio));
+            }
+        }
+    }
+
+    let mut movie_paths: Vec<std::path::PathBuf> = best_by_key.into_values().map(|(p, _)| p).collect();
+    movie_paths.sort();
+
+    for video_path in movie_paths {
+        let Some(rel_from_container) = video_path.strip_prefix(container_path).ok() else {
+            continue;
+        };
+        let rel_path = format!(
+            "{container_rel}/{}",
+            rel_from_container.to_string_lossy().replace('\\', "/")
+        );
+        let id = stable_id(&rel_path);
+
+        let parent = video_path.parent().unwrap_or(container_path);
+        let parent_rel = parent
+            .strip_prefix(container_path)
+            .ok()
+            .and_then(|p| p.to_str())
+            .map(|s| s.replace('\\', "/"))
+            .filter(|s| !s.is_empty());
+
+        let filename = video_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let stem = video_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+
+        // Prefer the enclosing folder name as the source of truth for title/year when
+        // it looks like a movie folder (i.e. the movie isn't sitting directly in the
+        // container or in a generic "Action"/"Comedy" organizational folder). Heuristic:
+        // if the folder name contains a year, it's the movie folder.
+        let folder_name = parent.file_name().map(|f| f.to_string_lossy().to_string());
+        let (title_source, year) = match folder_name.as_deref() {
+            Some(name) if parse_year(name).is_some() && !is_movies_container(name) => {
+                (name.to_string(), parse_year(name))
+            }
+            _ => {
+                let y = parse_year(&stem);
+                (stem.clone(), y)
+            }
+        };
+        let title = clean_movie_title(&title_source);
+        let title = if title.is_empty() { stem.clone() } else { title };
+
+        let size_bytes = video_path.metadata().map(|m| m.len()).unwrap_or(0);
+
+        // Art/backdrop search
+        let art = find_movie_art(&video_path, ART_NAMES).and_then(|p| {
+            p.strip_prefix(container_path)
+                .ok()
+                .map(|rel| format!("{container_rel}/{}", rel.to_string_lossy().replace('\\', "/")))
+        });
+        let backdrop = find_movie_art(&video_path, BACKDROP_NAMES).and_then(|p| {
+            p.strip_prefix(container_path)
+                .ok()
+                .map(|rel| format!("{container_rel}/{}", rel.to_string_lossy().replace('\\', "/")))
+        });
+
+        // tmdb.txt override inside the movie folder
+        let tmdb_id_override = {
+            let tmdb_path = parent.join("tmdb.txt");
+            if tmdb_path.exists() {
+                std::fs::read_to_string(&tmdb_path)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+            } else {
+                None
+            }
+        };
+
+        // Subtitles: same-stem *.srt in the movie's directory
+        let parent_rel_for_subs = parent_rel
+            .clone()
+            .map(|p| format!("{container_rel}/{p}"))
+            .unwrap_or_else(|| container_rel.to_string());
+        let subtitles = find_subtitle_files(parent, &stem, &parent_rel_for_subs);
+
+        out.insert(
+            id.clone(),
+            Movie {
+                id,
+                title,
+                year,
+                path: rel_path,
+                filename,
+                size_bytes,
+                art,
+                backdrop,
+                tmdb_id_override,
+                subtitles,
+            },
+        );
+    }
+}
+
 impl Library {
     pub fn scan(media_root: &Path) -> Result<Self, std::io::Error> {
         let mut series_map = BTreeMap::new();
+        let mut movies_map = BTreeMap::new();
 
-        // Each direct subdirectory of media_root is a series
+        // Each direct subdirectory of media_root is either a series or a movies container
         let mut entries: Vec<_> = std::fs::read_dir(media_root)?
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
@@ -322,6 +556,12 @@ impl Library {
             let dir_name = entry.file_name().to_string_lossy().to_string();
             // Skip hidden directories (.thumbnails, .remux, etc.)
             if dir_name.starts_with('.') {
+                continue;
+            }
+
+            // Movies container folder: scan recursively, each video is an independent Movie.
+            if is_movies_container(&dir_name) {
+                scan_movies_container(&entry.path(), &dir_name, &mut movies_map);
                 continue;
             }
             let series_path = entry.path();
@@ -449,7 +689,14 @@ impl Library {
             );
         }
 
-        Ok(Library { series: series_map })
+        Ok(Library {
+            series: series_map,
+            movies: movies_map,
+        })
+    }
+
+    pub fn find_movie(&self, movie_id: &str) -> Option<&Movie> {
+        self.movies.get(movie_id)
     }
 
     pub fn find_episode(&self, episode_id: &str) -> Option<(&Series, &Episode)> {
@@ -663,6 +910,97 @@ mod tests {
         let lib = Library::scan(dir.path()).unwrap();
         let series = lib.series.values().next().unwrap();
         assert_eq!(series.episodes.len(), 6);
+    }
+
+    #[test]
+    fn movies_folder_collects_flat_videos() {
+        let dir = make_media_dir();
+        let films = dir.path().join("Films");
+        fs::create_dir(&films).unwrap();
+        fs::write(films.join("Inception (2010).mkv"), b"v").unwrap();
+        fs::write(films.join("The Matrix (1999).mp4"), b"v").unwrap();
+
+        let lib = Library::scan(dir.path()).unwrap();
+        assert_eq!(lib.movies.len(), 2);
+        assert!(lib.series.is_empty());
+
+        let inception = lib.movies.values().find(|m| m.title == "Inception").unwrap();
+        assert_eq!(inception.year.as_deref(), Some("2010"));
+        assert_eq!(inception.path, "Films/Inception (2010).mkv");
+
+        let matrix = lib.movies.values().find(|m| m.title == "The Matrix").unwrap();
+        assert_eq!(matrix.year.as_deref(), Some("1999"));
+    }
+
+    #[test]
+    fn movies_folder_supports_folder_per_movie() {
+        let dir = make_media_dir();
+        let films = dir.path().join("Movies");
+        fs::create_dir(&films).unwrap();
+        let inc = films.join("Inception (2010)");
+        fs::create_dir(&inc).unwrap();
+        fs::write(inc.join("inception.mkv"), b"v").unwrap();
+        fs::write(inc.join(".poster.jpg"), b"art").unwrap();
+        fs::write(inc.join(".backdrop.jpg"), b"bd").unwrap();
+
+        let lib = Library::scan(dir.path()).unwrap();
+        assert_eq!(lib.movies.len(), 1);
+        let m = lib.movies.values().next().unwrap();
+        assert_eq!(m.title, "Inception");
+        assert_eq!(m.year.as_deref(), Some("2010"));
+        assert!(m.art.as_deref().unwrap().ends_with(".poster.jpg"));
+        assert!(m.backdrop.as_deref().unwrap().ends_with(".backdrop.jpg"));
+    }
+
+    #[test]
+    fn movies_folder_flattens_organizational_subfolders() {
+        let dir = make_media_dir();
+        let films = dir.path().join("Films");
+        fs::create_dir(&films).unwrap();
+        let action = films.join("Action");
+        fs::create_dir(&action).unwrap();
+        let comedy = films.join("Comedy");
+        fs::create_dir(&comedy).unwrap();
+        fs::write(action.join("Die Hard (1988).mkv"), b"v").unwrap();
+        fs::write(comedy.join("Airplane! (1980).mkv"), b"v").unwrap();
+
+        let lib = Library::scan(dir.path()).unwrap();
+        assert_eq!(lib.movies.len(), 2);
+        // Both flattened into the movies map regardless of subfolder
+        let titles: Vec<_> = lib.movies.values().map(|m| m.title.as_str()).collect();
+        assert!(titles.contains(&"Die Hard"));
+        assert!(titles.contains(&"Airplane!"));
+    }
+
+    #[test]
+    fn movies_dedupe_mkv_mp4_siblings() {
+        let dir = make_media_dir();
+        let films = dir.path().join("Films");
+        fs::create_dir(&films).unwrap();
+        fs::write(films.join("Inception (2010).mkv"), b"v").unwrap();
+        fs::write(films.join("Inception (2010).mp4"), b"v").unwrap();
+
+        let lib = Library::scan(dir.path()).unwrap();
+        assert_eq!(lib.movies.len(), 1);
+        assert!(lib.movies.values().next().unwrap().filename.ends_with(".mp4"));
+    }
+
+    #[test]
+    fn films_folder_does_not_become_a_series() {
+        let dir = make_media_dir();
+        let films = dir.path().join("Films");
+        fs::create_dir(&films).unwrap();
+        fs::write(films.join("Foo.mkv"), b"v").unwrap();
+
+        // A regular series beside the Films container
+        let series_dir = dir.path().join("Breaking Bad");
+        fs::create_dir(&series_dir).unwrap();
+        fs::write(series_dir.join("S01E01.mp4"), b"v").unwrap();
+
+        let lib = Library::scan(dir.path()).unwrap();
+        assert_eq!(lib.series.len(), 1);
+        assert_eq!(lib.movies.len(), 1);
+        assert_eq!(lib.series.values().next().unwrap().title, "Breaking Bad");
     }
 
     #[test]

@@ -422,56 +422,61 @@ pub async fn start_server(
                 let mut files = Vec::new();
                 let mut skipped_abandoned: u32 = 0;
                 let mut cleaned_orphans: u32 = 0;
+                // Helper closure to produce a remux entry for either a series episode
+                // or a movie, handling the mp4/tmp/orphan/abandoned logic uniformly.
+                let mut consider_video = |abs_path: PathBuf, id: String, series_id: String, rel_path: String| {
+                    if !routes::needs_remux(&abs_path) {
+                        return;
+                    }
+                    let stem = abs_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                    let Some(parent) = abs_path.parent() else { return };
+                    let mp4_path = parent.join(format!("{stem}.mp4"));
+                    let tmp_path = parent.join(format!("{stem}.mp4.tmp"));
+                    if mp4_path.exists() {
+                        return;
+                    }
+                    if tmp_path.exists() {
+                        let active = remux_state.remuxing.lock().map(|s| s.contains(&stem)).unwrap_or(false);
+                        if active {
+                            return;
+                        }
+                        match std::fs::remove_file(&tmp_path) {
+                            Ok(()) => cleaned_orphans += 1,
+                            Err(e) => {
+                                remux_state.log(&format!(
+                                    "Could not remove orphaned {}: {e}",
+                                    tmp_path.file_name().unwrap().to_string_lossy()
+                                ));
+                                return;
+                            }
+                        }
+                    }
+                    if remux_state.db.is_remux_abandoned(&id) {
+                        skipped_abandoned += 1;
+                        return;
+                    }
+                    files.push((abs_path, mp4_path, stem, id, series_id, rel_path));
+                };
+
                 for series in lib.series.values() {
                     for ep in &series.episodes {
-                        let ep_path = remux_path.join(&ep.path);
-                        if !routes::needs_remux(&ep_path) {
-                            continue;
-                        }
-                        let stem = ep_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-                        let parent = match ep_path.parent() {
-                            Some(p) => p,
-                            None => continue,
-                        };
-                        let mp4_path = parent.join(format!("{stem}.mp4"));
-                        let tmp_path = parent.join(format!("{stem}.mp4.tmp"));
-                        if mp4_path.exists() {
-                            continue;
-                        }
-                        if tmp_path.exists() {
-                            // Is anything actually remuxing this right now? state.remuxing is
-                            // process-local, so on a fresh start it's always empty — any .tmp
-                            // sitting around is an orphan from a prior crash/shutdown.
-                            let active = remux_state.remuxing.lock().map(|s| s.contains(&stem)).unwrap_or(false);
-                            if active {
-                                continue;
-                            }
-                            match std::fs::remove_file(&tmp_path) {
-                                Ok(()) => {
-                                    cleaned_orphans += 1;
-                                }
-                                Err(e) => {
-                                    remux_state.log(&format!(
-                                        "Could not remove orphaned {}: {e}",
-                                        tmp_path.file_name().unwrap().to_string_lossy()
-                                    ));
-                                    continue;
-                                }
-                            }
-                        }
-                        if remux_state.db.is_remux_abandoned(&ep.id) {
-                            skipped_abandoned += 1;
-                            continue;
-                        }
-                        files.push((
-                            ep_path,
-                            mp4_path,
-                            stem,
+                        consider_video(
+                            remux_path.join(&ep.path),
                             ep.id.clone(),
                             series.id.clone(),
                             ep.path.clone(),
-                        ));
+                        );
                     }
+                }
+                for movie in lib.movies.values() {
+                    // Movies don't belong to a series — use the movie's own id as the
+                    // "series_id" column so DB rows are still referentially consistent.
+                    consider_video(
+                        remux_path.join(&movie.path),
+                        movie.id.clone(),
+                        movie.id.clone(),
+                        movie.path.clone(),
+                    );
                 }
                 if cleaned_orphans > 0 {
                     remux_state.log(&format!(

@@ -406,6 +406,31 @@
                     <tbody id="failuresTableBody"></tbody>
                 </table>
             </div>
+
+            <div style="margin-top:32px; display:flex; align-items:center; gap:12px;">
+                <div style="flex:1;">
+                    <div style="font-size:16px; font-weight:600;">TMDB lookup failures</div>
+                    <div style="font-size:12px; color:#888;" id="tmdbFailuresSummary">No lookup failures.</div>
+                </div>
+                <button class="action-btn" onclick="retryAllTmdb(this)" id="retryAllTmdbBtn" style="display:none;">↻ Retry All Metadata</button>
+            </div>
+            <div id="tmdbFailuresEmpty" style="text-align:center; padding:40px 20px; color:#888;">
+                <div style="font-size: 40px;">📡</div>
+                <div style="margin-top:8px;">Every series and movie has been matched to TMDB.</div>
+            </div>
+            <table id="tmdbFailuresTable" style="display:none; width:100%; border-collapse:collapse;">
+                <thead>
+                    <tr style="border-bottom:1px solid #333; text-align:left;">
+                        <th style="padding:8px; font-size:12px; color:#888; font-weight:500;">Kind</th>
+                        <th style="padding:8px; font-size:12px; color:#888; font-weight:500;">Content ID</th>
+                        <th style="padding:8px; font-size:12px; color:#888; font-weight:500;">Attempts</th>
+                        <th style="padding:8px; font-size:12px; color:#888; font-weight:500;">Last error</th>
+                        <th style="padding:8px; font-size:12px; color:#888; font-weight:500;">When</th>
+                        <th style="padding:8px; font-size:12px; color:#888; font-weight:500;">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="tmdbFailuresTableBody"></tbody>
+            </table>
         </div>
 
         <!-- Settings page -->
@@ -518,13 +543,83 @@
         // --- Remux failures ---
         async function loadFailures() {
             try {
-                const resp = await fetch(apiUrl('/api/remux/failures'));
-                if (!resp.ok) throw new Error(`status ${resp.status}`);
-                const failures = await resp.json();
+                const [remuxResp, tmdbResp] = await Promise.all([
+                    fetch(apiUrl('/api/remux/failures')),
+                    fetch(apiUrl('/api/metadata/failures')),
+                ]);
+                const failures = remuxResp.ok ? await remuxResp.json() : [];
+                const tmdbFailures = tmdbResp.ok ? await tmdbResp.json() : [];
                 renderFailures(failures);
-                updateFailureBadge(failures.length);
+                renderTmdbFailures(tmdbFailures);
+                updateFailureBadge(failures.length + tmdbFailures.length);
             } catch (e) {
                 // Server might not be up yet
+            }
+        }
+
+        function renderTmdbFailures(failures) {
+            const tbody = document.getElementById('tmdbFailuresTableBody');
+            const table = document.getElementById('tmdbFailuresTable');
+            const empty = document.getElementById('tmdbFailuresEmpty');
+            const summary = document.getElementById('tmdbFailuresSummary');
+            const retryBtn = document.getElementById('retryAllTmdbBtn');
+
+            if (!failures || failures.length === 0) {
+                table.style.display = 'none';
+                empty.style.display = 'block';
+                summary.textContent = 'No lookup failures.';
+                retryBtn.style.display = 'none';
+                return;
+            }
+
+            const abandoned = failures.filter(f => f.given_up).length;
+            const retrying = failures.length - abandoned;
+            summary.textContent = `${failures.length} item${failures.length !== 1 ? 's' : ''} without TMDB metadata — ${abandoned} abandoned, ${retrying} still retrying.`;
+            empty.style.display = 'none';
+            table.style.display = 'table';
+            retryBtn.style.display = 'inline-block';
+
+            tbody.innerHTML = failures.map(f => {
+                const color = f.given_up ? '#ff3b30' : '#ff9f0a';
+                const icon = f.given_up ? '⛔' : '↻';
+                const when = new Date(f.last_attempt_at + 'Z').toLocaleString();
+                return `
+                    <tr style="border-bottom:1px solid #222;">
+                        <td style="padding:10px 8px; text-transform:capitalize;">${esc(f.kind)}</td>
+                        <td style="padding:10px 8px; font-family:monospace; font-size:12px; color:#ccc;">${esc(f.content_id)}</td>
+                        <td style="padding:10px 8px; color:${color};">${icon} ${f.attempts}</td>
+                        <td style="padding:10px 8px; font-size:12px; color:#bbb;">${esc(f.last_error || '')}</td>
+                        <td style="padding:10px 8px; font-size:12px; color:#888; white-space:nowrap;">${esc(when)}</td>
+                        <td style="padding:10px 8px; white-space:nowrap;">
+                            <button class="action-btn-sm" onclick="retryOneTmdb('${esc(f.content_id)}', this)">↻ Retry</button>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        async function retryAllTmdb(btn) {
+            const ok = await showConfirm('Retry metadata lookups?', 'This will clear the "given up" flag on all items so the next library scan re-queries TMDB.', 'Retry All');
+            if (!ok) return;
+            btn.disabled = true;
+            try {
+                await fetch(apiUrl('/api/metadata/retry'), { method: 'POST' });
+                showToast('TMDB lookup flags cleared', 'Items will be re-queried on the next scan.', 'success');
+                await loadFailures();
+            } catch (e) {
+                showToast('Retry failed', String(e), 'error');
+            }
+            btn.disabled = false;
+        }
+
+        async function retryOneTmdb(contentId, btn) {
+            btn.disabled = true;
+            try {
+                await fetch(apiUrl('/api/metadata/retry/' + encodeURIComponent(contentId)), { method: 'POST' });
+                await loadFailures();
+            } catch (e) {
+                showToast('Retry failed', String(e), 'error');
+                btn.disabled = false;
             }
         }
 
@@ -626,12 +721,17 @@
         }
 
         // Poll failure count periodically so the badge is up to date without needing
-        // the user to open the Failures tab.
-        setInterval(() => {
-            fetch(apiUrl('/api/remux/failures'))
-                .then(r => r.ok ? r.json() : null)
-                .then(f => { if (f) updateFailureBadge(f.length); })
-                .catch(() => {});
+        // the user to open the Failures tab. Counts both remux + TMDB lookup failures.
+        setInterval(async () => {
+            try {
+                const [r, t] = await Promise.all([
+                    fetch(apiUrl('/api/remux/failures')),
+                    fetch(apiUrl('/api/metadata/failures')),
+                ]);
+                const a = r.ok ? (await r.json()).length : 0;
+                const b = t.ok ? (await t.json()).length : 0;
+                updateFailureBadge(a + b);
+            } catch (e) {}
         }, 15000);
 
         // --- Logs ---

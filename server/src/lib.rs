@@ -164,9 +164,10 @@ pub async fn start_server(
 
     log(
         &format!(
-            "Found {} series with {} episodes",
+            "Found {} series with {} episodes, {} movies",
             lib.series.len(),
-            lib.series.values().map(|s| s.episodes.len()).sum::<usize>()
+            lib.series.values().map(|s| s.episodes.len()).sum::<usize>(),
+            lib.movies.len(),
         ),
         &log_cb,
     );
@@ -195,6 +196,23 @@ pub async fn start_server(
             .collect()
     });
 
+    // Same idea for movies.
+    let initial_movie_tmdb_work: Option<Vec<tmdb::MovieFetchEntry>> = tmdb_client.as_ref().map(|_| {
+        lib.movies
+            .values()
+            .filter(|m| m.art.is_none() || m.backdrop.is_none() || db.get_movie_metadata(&m.id).is_none())
+            .map(|m| tmdb::MovieFetchEntry {
+                movie_id: m.id.clone(),
+                title: m.title.clone(),
+                year: m.year.clone(),
+                video_path: std::path::PathBuf::from(&m.path),
+                has_art: m.art.is_some(),
+                has_backdrop: m.backdrop.is_some(),
+                tmdb_id_override: m.tmdb_id_override,
+            })
+            .collect()
+    });
+
     let state = Arc::new(AppState {
         library: RwLock::new(lib),
         db,
@@ -212,8 +230,10 @@ pub async fn start_server(
     // Kick off the initial TMDB fetch in the background (if needed). Progress lines flow
     // to the UI via state.log. After the fetch completes the library is rescanned so the
     // newly downloaded art files are picked up.
-    if let Some(work) = initial_tmdb_work {
-        if !work.is_empty() && state.tmdb.is_some() {
+    if state.tmdb.is_some() {
+        let series_work = initial_tmdb_work.unwrap_or_default();
+        let movie_work = initial_movie_tmdb_work.unwrap_or_default();
+        if !series_work.is_empty() || !movie_work.is_empty() {
             let tmdb_state = state.clone();
             let tmdb_path = media_path.clone();
             tokio::spawn(async move {
@@ -221,14 +241,31 @@ pub async fn start_server(
                     Some(c) => c,
                     None => return,
                 };
-                let count = work.len();
-                tmdb_state.log(&format!("Fetching TMDB metadata for {count} series..."));
-                let log_state = tmdb_state.clone();
-                let downloaded =
-                    tmdb::fetch_all_metadata(client, &tmdb_state.db, &tmdb_path, work, move |msg| log_state.log(msg))
+                if !series_work.is_empty() {
+                    let count = series_work.len();
+                    tmdb_state.log(&format!("Fetching TMDB metadata for {count} series..."));
+                    let log_state = tmdb_state.clone();
+                    let downloaded =
+                        tmdb::fetch_all_metadata(client, &tmdb_state.db, &tmdb_path, series_work, move |msg| {
+                            log_state.log(msg)
+                        })
                         .await;
-                if downloaded > 0 {
-                    tmdb_state.log(&format!("Downloaded artwork for {downloaded} series"));
+                    if downloaded > 0 {
+                        tmdb_state.log(&format!("Downloaded artwork for {downloaded} series"));
+                    }
+                }
+                if !movie_work.is_empty() {
+                    let count = movie_work.len();
+                    tmdb_state.log(&format!("Fetching TMDB metadata for {count} movies..."));
+                    let log_state = tmdb_state.clone();
+                    let downloaded =
+                        tmdb::fetch_all_movies_metadata(client, &tmdb_state.db, &tmdb_path, movie_work, move |msg| {
+                            log_state.log(msg)
+                        })
+                        .await;
+                    if downloaded > 0 {
+                        tmdb_state.log(&format!("Downloaded artwork for {downloaded} movies"));
+                    }
                 }
                 tmdb_state.log("TMDB metadata fetch complete");
                 if let Ok(updated) = library::Library::scan(&tmdb_path) {
@@ -280,7 +317,7 @@ pub async fn start_server(
                         prev_episode_count = new_episodes;
                     }
 
-                    // Fetch TMDB metadata for series that don't have it yet
+                    // Fetch TMDB metadata for series + movies that don't have it yet
                     if let Some(ref client) = rescan_state.tmdb {
                         let series_needing_metadata: Vec<_> = lib
                             .series
@@ -301,6 +338,27 @@ pub async fn start_server(
                             })
                             .collect();
 
+                        let movies_needing_metadata: Vec<tmdb::MovieFetchEntry> = lib
+                            .movies
+                            .values()
+                            .filter(|m| {
+                                m.art.is_none()
+                                    || m.backdrop.is_none()
+                                    || rescan_state.db.get_movie_metadata(&m.id).is_none()
+                            })
+                            .map(|m| tmdb::MovieFetchEntry {
+                                movie_id: m.id.clone(),
+                                title: m.title.clone(),
+                                year: m.year.clone(),
+                                video_path: std::path::PathBuf::from(&m.path),
+                                has_art: m.art.is_some(),
+                                has_backdrop: m.backdrop.is_some(),
+                                tmdb_id_override: m.tmdb_id_override,
+                            })
+                            .collect();
+
+                        let did_work = !series_needing_metadata.is_empty() || !movies_needing_metadata.is_empty();
+
                         if !series_needing_metadata.is_empty() {
                             let count = series_needing_metadata.len();
                             rescan_state.log(&format!("Fetching TMDB metadata for {count} series..."));
@@ -316,8 +374,26 @@ pub async fn start_server(
                             if downloaded > 0 {
                                 rescan_state.log(&format!("Downloaded artwork for {downloaded} series"));
                             }
+                        }
+                        if !movies_needing_metadata.is_empty() {
+                            let count = movies_needing_metadata.len();
+                            rescan_state.log(&format!("Fetching TMDB metadata for {count} movies..."));
+                            let log_state = rescan_state.clone();
+                            let downloaded = tmdb::fetch_all_movies_metadata(
+                                client,
+                                &rescan_state.db,
+                                &rescan_path,
+                                movies_needing_metadata,
+                                move |msg| log_state.log(msg),
+                            )
+                            .await;
+                            if downloaded > 0 {
+                                rescan_state.log(&format!("Downloaded artwork for {downloaded} movies"));
+                            }
+                        }
+
+                        if did_work {
                             rescan_state.log("TMDB metadata fetch complete");
-                            // Rescan again to pick up new art
                             if let Ok(updated_lib) = library::Library::scan(&rescan_path) {
                                 *rescan_state.library.write().await = updated_lib;
                                 continue;

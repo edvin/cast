@@ -101,6 +101,52 @@ pub struct EpisodeInfo {
     pub still_url: Option<String>,
 }
 
+// --- Movie types ---
+
+#[derive(Debug, Deserialize)]
+struct MovieSearchResponse {
+    results: Vec<MovieResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MovieResult {
+    id: u64,
+    title: String,
+    poster_path: Option<String>,
+    backdrop_path: Option<String>,
+    overview: Option<String>,
+    release_date: Option<String>,
+    vote_average: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TmdbMovieDetail {
+    id: u64,
+    title: String,
+    overview: Option<String>,
+    release_date: Option<String>,
+    poster_path: Option<String>,
+    backdrop_path: Option<String>,
+    vote_average: Option<f64>,
+    runtime: Option<u32>,
+    tagline: Option<String>,
+    genres: Option<Vec<Genre>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MovieInfo {
+    pub tmdb_id: u64,
+    pub title: String,
+    pub overview: Option<String>,
+    pub release_date: Option<String>,
+    pub poster_url: Option<String>,
+    pub backdrop_url: Option<String>,
+    pub runtime_minutes: Option<u32>,
+    pub tagline: Option<String>,
+    pub genres: Vec<String>,
+    pub rating: Option<f64>,
+}
+
 // --- Episode credits types ---
 
 #[derive(Debug, Deserialize)]
@@ -263,6 +309,71 @@ impl TmdbClient {
             genres,
             rating: detail.vote_average,
             seasons,
+        }))
+    }
+
+    /// Search TMDB for a movie by title (optional year improves the match).
+    pub async fn search_movie(&self, query: &str, year: Option<&str>) -> Result<Option<MovieInfo>, reqwest::Error> {
+        let mut params: Vec<(&str, &str)> = vec![("api_key", &self.api_key), ("query", query)];
+        if let Some(y) = year {
+            params.push(("year", y));
+        }
+        let resp: MovieSearchResponse = self
+            .http
+            .get(format!("{TMDB_BASE}/search/movie"))
+            .query(&params)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        match resp.results.into_iter().next() {
+            Some(r) => {
+                // Fetch full details for runtime, tagline, genres
+                match self.get_movie_detail(r.id).await {
+                    Ok(Some(detail)) => Ok(Some(detail)),
+                    _ => Ok(Some(MovieInfo {
+                        tmdb_id: r.id,
+                        title: r.title,
+                        overview: r.overview,
+                        release_date: r.release_date,
+                        poster_url: r.poster_path.map(|p| format!("{TMDB_IMAGE_BASE}/w500{p}")),
+                        backdrop_url: r.backdrop_path.map(|p| format!("{TMDB_IMAGE_BASE}/w1280{p}")),
+                        runtime_minutes: None,
+                        tagline: None,
+                        genres: vec![],
+                        rating: r.vote_average,
+                    })),
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Fetch full movie detail by TMDB id.
+    pub async fn get_movie_detail(&self, tmdb_id: u64) -> Result<Option<MovieInfo>, reqwest::Error> {
+        let resp = self
+            .http
+            .get(format!("{TMDB_BASE}/movie/{tmdb_id}"))
+            .query(&[("api_key", &self.api_key)])
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        let detail: TmdbMovieDetail = resp.json().await?;
+        let genres: Vec<String> = detail.genres.unwrap_or_default().into_iter().map(|g| g.name).collect();
+        Ok(Some(MovieInfo {
+            tmdb_id: detail.id,
+            title: detail.title,
+            overview: detail.overview,
+            release_date: detail.release_date,
+            poster_url: detail.poster_path.map(|p| format!("{TMDB_IMAGE_BASE}/w500{p}")),
+            backdrop_url: detail.backdrop_path.map(|p| format!("{TMDB_IMAGE_BASE}/w1280{p}")),
+            runtime_minutes: detail.runtime,
+            tagline: detail.tagline.filter(|t| !t.is_empty()),
+            genres,
+            rating: detail.vote_average,
         }))
     }
 
@@ -487,6 +598,158 @@ pub fn clean_search_query(folder_name: &str) -> String {
     let s = RE_YEAR_BARE.replace_all(&s, "");
     let s = RE_MULTI_SPACE.replace_all(&s, " ");
     s.trim().to_string()
+}
+
+/// One movie to fetch metadata for. Passed in by value from the scan so we don't
+/// hold a library read lock across the network round-trip.
+pub struct MovieFetchEntry {
+    pub movie_id: String,
+    pub title: String,
+    pub year: Option<String>,
+    /// Relative path from media_root to the video file
+    pub video_path: std::path::PathBuf,
+    pub has_art: bool,
+    pub has_backdrop: bool,
+    pub tmdb_id_override: Option<u64>,
+}
+
+/// Fetch TMDB metadata + art for a list of movies. Mirrors fetch_all_metadata but
+/// targets the /movie/... endpoints.
+pub async fn fetch_all_movies_metadata(
+    client: &TmdbClient,
+    db: &crate::db::Database,
+    media_root: &Path,
+    movies: Vec<MovieFetchEntry>,
+    log: impl Fn(&str),
+) -> usize {
+    let mut downloaded = 0;
+    let total = movies.len();
+    for (i, entry) in movies.into_iter().enumerate() {
+        if db.get_movie_metadata(&entry.movie_id).is_some() && entry.has_art && entry.has_backdrop {
+            continue;
+        }
+
+        let msg = format!("TMDB movie [{}/{}]: {}", i + 1, total, entry.title);
+        tracing::info!("{msg}");
+        log(&msg);
+
+        let search_result = if let Some(tmdb_id) = entry.tmdb_id_override {
+            let m = format!("Using TMDB movie ID override {tmdb_id} for '{}'", entry.title);
+            tracing::info!("{m}");
+            log(&m);
+            client.get_movie_detail(tmdb_id).await
+        } else {
+            client.search_movie(&entry.title, entry.year.as_deref()).await
+        };
+
+        match search_result {
+            Ok(Some(info)) => {
+                let meta = crate::db::MovieMetadata {
+                    movie_id: entry.movie_id.clone(),
+                    tmdb_id: Some(info.tmdb_id),
+                    title: Some(info.title.clone()),
+                    overview: info.overview.clone(),
+                    release_date: info.release_date.clone(),
+                    runtime_minutes: info.runtime_minutes,
+                    genres: if info.genres.is_empty() {
+                        None
+                    } else {
+                        Some(info.genres.join(", "))
+                    },
+                    rating: info.rating,
+                    tagline: info.tagline.clone(),
+                };
+                if let Err(e) = db.save_movie_metadata(&meta) {
+                    let m = format!("Failed to save movie metadata for '{}': {e}", entry.title);
+                    tracing::warn!("{m}");
+                    log(&m);
+                }
+
+                // Pick art destination. If the video is in its own folder (the folder
+                // contains only videos/subs/art, not other movies), write `.poster.jpg`
+                // next to it. Otherwise use a stem-prefixed filename.
+                let abs_video = media_root.join(&entry.video_path);
+                let parent = match abs_video.parent() {
+                    Some(p) => p.to_path_buf(),
+                    None => continue,
+                };
+                let stem = abs_video.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                let folder_is_movie_folder = is_single_movie_folder(&parent, media_root);
+
+                if !entry.has_art {
+                    if let Some(ref url) = info.poster_url {
+                        let ext = image_extension(url);
+                        let dest = if folder_is_movie_folder {
+                            parent.join(format!(".poster.{ext}"))
+                        } else {
+                            parent.join(format!("{stem}-poster.{ext}"))
+                        };
+                        if let Err(e) = client.download_image(url, &dest).await {
+                            let m = format!("Failed to download poster for '{}': {e}", entry.title);
+                            tracing::warn!("{m}");
+                            log(&m);
+                        } else {
+                            downloaded += 1;
+                        }
+                    }
+                }
+
+                if !entry.has_backdrop {
+                    if let Some(ref url) = info.backdrop_url {
+                        let ext = image_extension(url);
+                        let dest = if folder_is_movie_folder {
+                            parent.join(format!(".backdrop.{ext}"))
+                        } else {
+                            parent.join(format!("{stem}-backdrop.{ext}"))
+                        };
+                        if let Err(e) = client.download_image(url, &dest).await {
+                            let m = format!("Failed to download backdrop for '{}': {e}", entry.title);
+                            tracing::warn!("{m}");
+                            log(&m);
+                        }
+                    }
+                }
+            }
+            Ok(None) => {
+                let m = format!("No TMDB movie match for '{}'", entry.title);
+                tracing::info!("{m}");
+                log(&m);
+            }
+            Err(e) => {
+                let m = format!("TMDB movie search failed for '{}': {e}", entry.title);
+                tracing::warn!("{m}");
+                log(&m);
+            }
+        }
+    }
+    downloaded
+}
+
+/// Is `dir` a "single movie folder" (a folder whose sole purpose is one movie)?
+/// Used to decide whether to drop `.poster.jpg`/`.backdrop.jpg` into the folder
+/// (movie folder) or use stem-prefixed names (shared organizational folder).
+fn is_single_movie_folder(dir: &Path, media_root: &Path) -> bool {
+    // Walk the immediate children. If there's exactly one video file, we treat it
+    // as a movie folder. Multiple videos → organizational folder, use stem prefix.
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    let mut video_count = 0;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let p = entry.path();
+        if p.is_file() {
+            let ext = p.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase());
+            if matches!(ext.as_deref(), Some("mp4" | "m4v" | "mov" | "mkv" | "avi" | "webm")) {
+                video_count += 1;
+                if video_count > 1 {
+                    return false;
+                }
+            }
+        }
+    }
+    // Don't treat the media root or the Films/Movies container itself as a movie folder
+    dir != media_root && video_count == 1
 }
 
 /// Fetch metadata for all series, download art, and store metadata in DB.

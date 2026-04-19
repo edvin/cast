@@ -28,6 +28,19 @@ pub struct SeriesMetadata {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct MovieMetadata {
+    pub movie_id: String,
+    pub tmdb_id: Option<u64>,
+    pub title: Option<String>,
+    pub overview: Option<String>,
+    pub release_date: Option<String>,
+    pub runtime_minutes: Option<u32>,
+    pub genres: Option<String>,
+    pub rating: Option<f64>,
+    pub tagline: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct EpisodeMetadata {
     pub episode_id: String,
     pub series_id: String,
@@ -98,6 +111,19 @@ impl Database {
                 last_error TEXT,
                 last_attempt_at TEXT NOT NULL DEFAULT (datetime('now')),
                 given_up INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS movie_metadata (
+                movie_id TEXT PRIMARY KEY,
+                tmdb_id INTEGER,
+                title TEXT,
+                overview TEXT,
+                release_date TEXT,
+                runtime_minutes INTEGER,
+                genres TEXT,
+                rating REAL,
+                tagline TEXT,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );",
         )?;
 
@@ -394,6 +420,68 @@ impl Database {
         let _ = conn.execute("DELETE FROM episode_metadata WHERE series_id = ?1", params![series_id]);
         let _ = conn.execute("DELETE FROM episode_credits WHERE series_id = ?1", params![series_id]);
         let _ = conn.execute("DELETE FROM remux_failures WHERE series_id = ?1", params![series_id]);
+    }
+
+    // --- Movie metadata ---
+
+    pub fn save_movie_metadata(&self, meta: &MovieMetadata) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO movie_metadata (movie_id, tmdb_id, title, overview, release_date,
+                                         runtime_minutes, genres, rating, tagline, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, datetime('now'))
+             ON CONFLICT(movie_id) DO UPDATE SET
+                tmdb_id = excluded.tmdb_id,
+                title = excluded.title,
+                overview = excluded.overview,
+                release_date = excluded.release_date,
+                runtime_minutes = excluded.runtime_minutes,
+                genres = excluded.genres,
+                rating = excluded.rating,
+                tagline = excluded.tagline,
+                updated_at = excluded.updated_at",
+            params![
+                meta.movie_id,
+                meta.tmdb_id,
+                meta.title,
+                meta.overview,
+                meta.release_date,
+                meta.runtime_minutes,
+                meta.genres,
+                meta.rating,
+                meta.tagline,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_movie_metadata(&self, movie_id: &str) -> Option<MovieMetadata> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT movie_id, tmdb_id, title, overview, release_date,
+                    runtime_minutes, genres, rating, tagline
+             FROM movie_metadata WHERE movie_id = ?1",
+            params![movie_id],
+            |row| {
+                Ok(MovieMetadata {
+                    movie_id: row.get(0)?,
+                    tmdb_id: row.get::<_, Option<i64>>(1)?.map(|v| v as u64),
+                    title: row.get(2)?,
+                    overview: row.get(3)?,
+                    release_date: row.get(4)?,
+                    runtime_minutes: row.get::<_, Option<i64>>(5)?.map(|v| v as u32),
+                    genres: row.get(6)?,
+                    rating: row.get(7)?,
+                    tagline: row.get(8)?,
+                })
+            },
+        )
+        .ok()
+    }
+
+    pub fn delete_movie_metadata(&self, movie_id: &str) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute("DELETE FROM movie_metadata WHERE movie_id = ?1", params![movie_id]);
     }
 
     // --- Remux failure tracking ---

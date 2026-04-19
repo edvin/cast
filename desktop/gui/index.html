@@ -644,14 +644,47 @@
 
         function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
+        // Number of log entries currently rendered in the DOM. Used by the polling
+        // fallback to detect new entries and append just the delta.
+        let renderedLogCount = 0;
+
         async function loadLogs() {
             const logs = await invoke('get_logs');
             logContainer.innerHTML = '';
             logs.forEach(log => addLog(log.timestamp, log.message));
+            renderedLogCount = logs.length;
             if (logs.length > 0) {
                 document.getElementById('statusActivity').textContent = logs[logs.length - 1].message;
             }
         }
+
+        // Poll the server's log buffer every 2s and append any entries we haven't
+        // rendered yet. This is a fallback for Tauri's `listen('server-log')` which
+        // can silently stop delivering on some Windows setups.
+        async function pollLogsDelta() {
+            try {
+                const logs = await invoke('get_logs');
+                if (logs.length < renderedLogCount) {
+                    // Buffer was truncated (rolled past max_entries). Full redraw.
+                    logContainer.innerHTML = '';
+                    logs.forEach(log => addLog(log.timestamp, log.message));
+                    renderedLogCount = logs.length;
+                } else if (logs.length > renderedLogCount) {
+                    for (let i = renderedLogCount; i < logs.length; i++) {
+                        addLog(logs[i].timestamp, logs[i].message);
+                        if (!logsTabActive) logBadgeCount++;
+                    }
+                    renderedLogCount = logs.length;
+                    updateLogBadge();
+                    const last = logs[logs.length - 1];
+                    const statusEl = document.getElementById('statusActivity');
+                    if (statusEl) statusEl.textContent = last.message;
+                }
+            } catch (e) {
+                // Server not up yet, ignore
+            }
+        }
+        setInterval(pollLogsDelta, 2000);
 
         listen('server-status', (e) => updateStatus(e.payload));
 
@@ -751,13 +784,10 @@
             });
         });
 
-        // Increment badge on new logs when not on logs tab + update status bar
-        listen('server-log', (e) => {
-            const now = new Date().toLocaleTimeString('en-GB', { hour12: false });
-            addLog(now, e.payload);
-            if (!logsTabActive) { logBadgeCount++; updateLogBadge(); }
-            document.getElementById('statusActivity').textContent = e.payload;
-        });
+        // Note: Tauri's listen('server-log', ...) turned out to stop delivering events
+        // silently on some Windows setups — updates would only appear after switching
+        // tabs and triggering loadLogs(). We now drive log updates entirely from the
+        // 2-second poll above (pollLogsDelta), which also handles badge + status bar.
 
         // --- Library ---
         let lastSeriesData = null;

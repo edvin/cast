@@ -456,6 +456,11 @@
                     <label style="margin:0; flex-shrink:0;">Start on login</label>
                     <input type="checkbox" id="cfgAutostart" style="width:auto;" onchange="toggleAutostart(this.checked)">
                 </div>
+                <div class="field" style="display:flex; align-items:center; gap:10px;">
+                    <label style="margin:0; flex-shrink:0;">Verbose logging</label>
+                    <input type="checkbox" id="cfgDebugLog" style="width:auto;" onchange="toggleDebugLogging(this.checked)">
+                    <div style="font-size:11px; color:#888;">Shows per-cycle scan chatter and per-item progress. Applies immediately.</div>
+                </div>
 
                 <div>
                     <button class="save-btn" id="saveBtn">Save & Start Server</button>
@@ -822,6 +827,7 @@
             document.getElementById('cfgServerName').value = config.server_name;
             document.getElementById('cfgPort').value = config.port;
             document.getElementById('cfgEncoder').value = config.encoder || 'auto';
+            document.getElementById('cfgDebugLog').checked = !!config.debug_logging;
         }
 
         document.getElementById('saveBtn').addEventListener('click', async () => {
@@ -842,6 +848,7 @@
                 server_name: document.getElementById('cfgServerName').value.trim() || 'Cast Server',
                 port: portValue,
                 encoder: document.getElementById('cfgEncoder').value || 'auto',
+                debug_logging: document.getElementById('cfgDebugLog').checked,
             };
             try {
                 btn.disabled = true;
@@ -1582,6 +1589,23 @@
             } catch (e) {
                 showToast('Failed to set auto-start', String(e), 'error');
                 document.getElementById('cfgAutostart').checked = !enabled;
+            }
+        }
+
+        async function toggleDebugLogging(enabled) {
+            // Applies immediately via /api/log-level; the Save button below also
+            // persists the preference to .env for the next startup.
+            try {
+                const resp = await fetch(apiUrl('/api/log-level'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ debug: enabled }),
+                });
+                if (!resp.ok) throw new Error(`status ${resp.status}`);
+                showToast(enabled ? 'Verbose logging on' : 'Verbose logging off', 'Save settings to persist this choice.', 'success');
+            } catch (e) {
+                showToast('Could not toggle logging', String(e), 'error');
+                document.getElementById('cfgDebugLog').checked = !enabled;
             }
         }
 

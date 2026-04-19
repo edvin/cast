@@ -104,6 +104,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/metadata/failures", get(get_tmdb_failures))
         .route("/api/metadata/retry", post(retry_all_tmdb_lookups))
         .route("/api/metadata/retry/{content_id}", post(retry_one_tmdb_lookup))
+        // Log verbosity toggle
+        .route("/api/log-level", get(get_log_level))
+        .route("/api/log-level", post(set_log_level))
         // Movies
         .route("/api/movies", get(list_movies))
         .route("/api/movies/{movie_id}", get(get_movie))
@@ -169,6 +172,33 @@ async fn retry_one_tmdb_lookup(
     state.db.clear_tmdb_failure(&content_id);
     state.log(&format!("Cleared TMDB lookup failure for {content_id}"));
     Json(RetryResponse { cleared: true })
+}
+
+#[derive(Serialize)]
+struct LogLevelResponse {
+    debug: bool,
+}
+
+#[derive(Deserialize)]
+struct LogLevelUpdate {
+    debug: bool,
+}
+
+async fn get_log_level(State(state): State<Arc<AppState>>) -> Json<LogLevelResponse> {
+    Json(LogLevelResponse {
+        debug: state.debug_logging.load(std::sync::atomic::Ordering::Relaxed),
+    })
+}
+
+async fn set_log_level(State(state): State<Arc<AppState>>, Json(body): Json<LogLevelUpdate>) -> Json<LogLevelResponse> {
+    state
+        .debug_logging
+        .store(body.debug, std::sync::atomic::Ordering::Relaxed);
+    state.log(&format!(
+        "Verbose logging {}",
+        if body.debug { "enabled" } else { "disabled" }
+    ));
+    Json(LogLevelResponse { debug: body.debug })
 }
 
 #[derive(Serialize)]
@@ -1479,9 +1509,15 @@ async fn fetch_metadata(State(state): State<Arc<AppState>>) -> ApiResult<Json<Fe
 
     let total = series_info.len();
     let log_state = state.clone();
-    let downloaded = crate::tmdb::fetch_all_metadata(client, &state.db, &state.media_path, series_info, move |msg| {
-        log_state.log(msg)
-    })
+    let debug_state = state.clone();
+    let downloaded = crate::tmdb::fetch_all_metadata(
+        client,
+        &state.db,
+        &state.media_path,
+        series_info,
+        move |msg| log_state.log(msg),
+        move |msg| debug_state.debug(msg),
+    )
     .await;
 
     // Rescan library to pick up new art files
@@ -2029,13 +2065,18 @@ async fn rescan_library(State(state): State<Arc<AppState>>) -> ApiResult<Json<se
 
                 if !needs_meta.is_empty() {
                     let count = needs_meta.len();
-                    state.log(&format!("Fetching TMDB metadata for {count} series..."));
+                    state.debug(&format!("Fetching TMDB metadata for {count} series..."));
                     let log_state = state.clone();
-                    let downloaded =
-                        crate::tmdb::fetch_all_metadata(client, &state.db, &state.media_path, needs_meta, move |msg| {
-                            log_state.log(msg)
-                        })
-                        .await;
+                    let debug_state = state.clone();
+                    let downloaded = crate::tmdb::fetch_all_metadata(
+                        client,
+                        &state.db,
+                        &state.media_path,
+                        needs_meta,
+                        move |msg| log_state.log(msg),
+                        move |msg| debug_state.debug(msg),
+                    )
+                    .await;
                     if downloaded > 0 {
                         state.log(&format!("Downloaded artwork for {downloaded} series"));
                     }
@@ -2754,6 +2795,7 @@ mod tests {
             thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
             transcode_encoder: ("libx264", "-pix_fmt yuv420p -crf 18 -preset fast"),
             encoder_label: "software (libx264)".to_string(),
+            debug_logging: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             log: None,
         });
 
@@ -3062,6 +3104,7 @@ mod tests {
             thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
             transcode_encoder: ("libx264", "-pix_fmt yuv420p -crf 18 -preset fast"),
             encoder_label: "software (libx264)".to_string(),
+            debug_logging: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             log: None,
         });
 
@@ -3131,6 +3174,7 @@ mod tests {
             thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
             transcode_encoder: ("libx264", "-pix_fmt yuv420p -crf 18 -preset fast"),
             encoder_label: "software (libx264)".to_string(),
+            debug_logging: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             log: None,
         });
 
@@ -3354,6 +3398,7 @@ mod tests {
             thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
             transcode_encoder: ("libx264", "-pix_fmt yuv420p -crf 18 -preset fast"),
             encoder_label: "software (libx264)".to_string(),
+            debug_logging: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             log: None,
         });
 

@@ -53,6 +53,8 @@ struct AppConfig {
     /// or one of: nvenc, qsv, amf, videotoolbox, software/libx264.
     #[serde(default = "default_encoder")]
     encoder: String,
+    #[serde(default)]
+    debug_logging: bool,
 }
 
 fn default_encoder() -> String {
@@ -67,6 +69,7 @@ impl Default for AppConfig {
             server_name: "Cast Server".to_string(),
             port: 3456,
             encoder: default_encoder(),
+            debug_logging: false,
         }
     }
 }
@@ -91,6 +94,15 @@ fn load_config() -> AppConfig {
             .and_then(|p| p.parse().ok())
             .unwrap_or(3456),
         encoder: std::env::var("CAST_ENCODER").unwrap_or_else(|_| default_encoder()),
+        debug_logging: std::env::var("CAST_LOG_DEBUG")
+            .ok()
+            .map(|v| {
+                matches!(
+                    v.trim().to_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false),
     }
 }
 
@@ -124,6 +136,9 @@ fn save_config_to_env(config: &AppConfig) -> Result<(), String> {
     content += &format!("CAST_PORT={}\n", config.port);
     if !config.encoder.is_empty() && config.encoder != "auto" {
         content += &format!("CAST_ENCODER={}\n", env_quote(&config.encoder));
+    }
+    if config.debug_logging {
+        content += "CAST_LOG_DEBUG=true\n";
     }
     std::fs::write(&env_path, content).map_err(|e| e.to_string())?;
     Ok(())
@@ -199,6 +214,7 @@ async fn restart_server(
         } else {
             Some(config.encoder.clone())
         },
+        debug_logging: config.debug_logging,
     };
 
     let log_cb = {
@@ -541,6 +557,7 @@ pub fn run() {
                     } else {
                         Some(config.encoder.clone())
                     },
+                    debug_logging: config.debug_logging,
                 };
 
                 tauri::async_runtime::spawn(async move {

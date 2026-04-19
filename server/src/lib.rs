@@ -34,14 +34,31 @@ pub struct AppState {
     pub transcode_encoder: (&'static str, &'static str),
     /// Human-readable label for the encoder, surfaced via /api/hwenc and the UI.
     pub encoder_label: String,
+    /// If true, `state.debug()` messages flow to the UI log too. Otherwise they go
+    /// to tracing only. Toggle at runtime via POST /api/log-level.
+    pub debug_logging: Arc<std::sync::atomic::AtomicBool>,
     pub log: Option<LogCallback>,
 }
 
 impl AppState {
-    /// Log a message to stderr, tracing, and the UI callback.
+    /// User-visible info message: stderr, tracing, UI callback. Always emitted.
     pub fn log(&self, msg: &str) {
         eprintln!("[cast] {msg}");
         tracing::info!("{msg}");
+        if let Some(ref cb) = self.log {
+            cb(msg);
+        }
+    }
+
+    /// Background/diagnostic message. Goes to tracing unconditionally; only reaches
+    /// the UI log when verbose logging is enabled. Use this for periodic housekeeping,
+    /// per-item progress during bulk operations, and other "not every cycle" noise.
+    pub fn debug(&self, msg: &str) {
+        tracing::debug!("{msg}");
+        if !self.debug_logging.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        eprintln!("[cast] {msg}");
         if let Some(ref cb) = self.log {
             cb(msg);
         }
@@ -56,6 +73,8 @@ pub struct ServerConfig {
     pub tmdb_key: Option<String>,
     /// Encoder override: "auto" (default) | nvenc | qsv | amf | videotoolbox | software
     pub encoder_override: Option<String>,
+    /// Start with verbose/debug logging visible in the UI.
+    pub debug_logging: bool,
 }
 
 /// A handle to the running server, can be used to get state info
@@ -72,29 +91,40 @@ pub async fn start_server(
     log_callback: Option<BoxedLogCallback>,
 ) -> Result<ServerHandle, Box<dyn std::error::Error>> {
     let log_cb: Option<LogCallback> = log_callback.map(|cb| Arc::from(cb) as LogCallback);
-    // Every log line goes through this closure: stderr (for CLI), tracing (for env-filter
-    // consumers), and the UI callback (the desktop app's Logs tab).
-    let log = |msg: &str, cb: &Option<LogCallback>| {
+    // CAST_LOG_DEBUG=true turns on verbose logging in the UI even before AppState is
+    // built. Otherwise the closures below respect a runtime flag that AppState holds.
+    let env_debug = std::env::var("CAST_LOG_DEBUG")
+        .ok()
+        .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    let debug_flag = Arc::new(std::sync::atomic::AtomicBool::new(config.debug_logging || env_debug));
+
+    // info(msg) — always shows in the UI. Use for user-relevant state + errors.
+    let info = |msg: &str, cb: &Option<LogCallback>| {
         eprintln!("[cast] {msg}");
         tracing::info!("{msg}");
         if let Some(ref f) = cb {
             f(msg);
         }
     };
+    // debug(msg) — only shows in the UI when the debug flag is on. Use for
+    // diagnostics, housekeeping and bulk-operation per-item progress.
+    let debug_logger = |msg: &str, cb: &Option<LogCallback>, flag: &Arc<std::sync::atomic::AtomicBool>| {
+        tracing::debug!("{msg}");
+        if !flag.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        eprintln!("[cast] {msg}");
+        if let Some(ref f) = cb {
+            f(msg);
+        }
+    };
 
-    // Canary: prove the callback plumbing works. If the user doesn't see this line in
-    // the desktop Logs tab, the issue is the callback itself, not a later hang.
-    log(
-        &format!(
-            "Cast server v{} starting (log callback wired)",
-            env!("CARGO_PKG_VERSION")
-        ),
-        &log_cb,
-    );
+    info(&format!("Cast server v{} starting", env!("CARGO_PKG_VERSION")), &log_cb);
 
     let media_path = config.media_path.canonicalize().map_err(|e| {
         let msg = format!("Media directory does not exist: {:?} ({e})", config.media_path);
-        log(&msg, &log_cb);
+        info(&msg, &log_cb);
         msg
     })?;
 
@@ -110,27 +140,35 @@ pub async fn start_server(
         }
     };
 
-    log(&format!("Scanning media directory: {media_path:?}"), &log_cb);
+    debug_logger(
+        &format!("Scanning media directory: {media_path:?}"),
+        &log_cb,
+        &debug_flag,
+    );
 
-    log("Checking for ffprobe...", &log_cb);
+    debug_logger("Checking for ffprobe...", &log_cb, &debug_flag);
     if media::is_ffprobe_available() {
-        log("ffprobe detected", &log_cb);
+        debug_logger("ffprobe detected", &log_cb, &debug_flag);
     } else {
-        log("ffprobe NOT found in PATH (thumbnails/duration disabled)", &log_cb);
+        info("ffprobe NOT found in PATH (thumbnails/duration disabled)", &log_cb);
     }
-    log("Checking for ffmpeg...", &log_cb);
+    debug_logger("Checking for ffmpeg...", &log_cb, &debug_flag);
     let ffmpeg_ok = media::is_ffmpeg_available();
     if ffmpeg_ok {
-        log("ffmpeg detected", &log_cb);
-        log("Probing hardware encoders (NVENC/QSV/AMF/VideoToolbox)...", &log_cb);
+        debug_logger("ffmpeg detected", &log_cb, &debug_flag);
+        debug_logger(
+            "Probing hardware encoders (NVENC/QSV/AMF/VideoToolbox)...",
+            &log_cb,
+            &debug_flag,
+        );
         for (name, _args, result) in routes::probe_all_encoders() {
             match result {
-                Ok(()) => log(&format!("  {name}: OK"), &log_cb),
-                Err(reason) => log(&format!("  {name}: unavailable — {reason}"), &log_cb),
+                Ok(()) => debug_logger(&format!("  {name}: OK"), &log_cb, &debug_flag),
+                Err(reason) => debug_logger(&format!("  {name}: unavailable — {reason}"), &log_cb, &debug_flag),
             }
         }
     } else {
-        log(
+        info(
             "ffmpeg NOT found in PATH (playback will fail for non-MP4 files)",
             &log_cb,
         );
@@ -143,28 +181,27 @@ pub async fn start_server(
         .or_else(|| std::env::var("CAST_ENCODER").ok());
     let (transcode_encoder, encoder_msg) = routes::resolve_encoder(encoder_choice.as_deref());
     if ffmpeg_ok {
-        log(&encoder_msg, &log_cb);
+        info(&encoder_msg, &log_cb);
     }
     let encoder_label = routes::label_for(transcode_encoder.0);
 
-    log("Opening cast.db...", &log_cb);
+    debug_logger("Opening cast.db...", &log_cb, &debug_flag);
     let db = db::Database::new(&media_path).map_err(|e| {
         let msg = format!("Failed to open cast.db: {e}");
-        log(&msg, &log_cb);
+        info(&msg, &log_cb);
         msg
     })?;
-    log("cast.db ready", &log_cb);
 
-    log("Scanning library on disk...", &log_cb);
+    debug_logger("Scanning library on disk...", &log_cb, &debug_flag);
     let lib = library::Library::scan(&media_path).map_err(|e| {
         let msg = format!("Library scan failed: {e}");
-        log(&msg, &log_cb);
+        info(&msg, &log_cb);
         msg
     })?;
 
-    log(
+    info(
         &format!(
-            "Found {} series with {} episodes, {} movies",
+            "Library: {} series with {} episodes, {} movies",
             lib.series.len(),
             lib.series.values().map(|s| s.episodes.len()).sum::<usize>(),
             lib.movies.len(),
@@ -173,7 +210,7 @@ pub async fn start_server(
     );
 
     let tmdb_client = config.tmdb_key.map(|key| {
-        log("TMDB integration enabled", &log_cb);
+        info("TMDB integration enabled", &log_cb);
         tmdb::TmdbClient::new(key)
     });
 
@@ -232,6 +269,7 @@ pub async fn start_server(
         thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
         transcode_encoder,
         encoder_label,
+        debug_logging: debug_flag,
         log: log_cb,
     });
 
@@ -251,31 +289,41 @@ pub async fn start_server(
                 };
                 if !series_work.is_empty() {
                     let count = series_work.len();
-                    tmdb_state.log(&format!("Fetching TMDB metadata for {count} series..."));
+                    tmdb_state.debug(&format!("Fetching TMDB metadata for {count} series..."));
                     let log_state = tmdb_state.clone();
-                    let downloaded =
-                        tmdb::fetch_all_metadata(client, &tmdb_state.db, &tmdb_path, series_work, move |msg| {
-                            log_state.log(msg)
-                        })
-                        .await;
+                    let debug_state = tmdb_state.clone();
+                    let downloaded = tmdb::fetch_all_metadata(
+                        client,
+                        &tmdb_state.db,
+                        &tmdb_path,
+                        series_work,
+                        move |msg| log_state.log(msg),
+                        move |msg| debug_state.debug(msg),
+                    )
+                    .await;
                     if downloaded > 0 {
                         tmdb_state.log(&format!("Downloaded artwork for {downloaded} series"));
                     }
                 }
                 if !movie_work.is_empty() {
                     let count = movie_work.len();
-                    tmdb_state.log(&format!("Fetching TMDB metadata for {count} movies..."));
+                    tmdb_state.debug(&format!("Fetching TMDB metadata for {count} movies..."));
                     let log_state = tmdb_state.clone();
-                    let downloaded =
-                        tmdb::fetch_all_movies_metadata(client, &tmdb_state.db, &tmdb_path, movie_work, move |msg| {
-                            log_state.log(msg)
-                        })
-                        .await;
+                    let debug_state = tmdb_state.clone();
+                    let downloaded = tmdb::fetch_all_movies_metadata(
+                        client,
+                        &tmdb_state.db,
+                        &tmdb_path,
+                        movie_work,
+                        move |msg| log_state.log(msg),
+                        move |msg| debug_state.debug(msg),
+                    )
+                    .await;
                     if downloaded > 0 {
                         tmdb_state.log(&format!("Downloaded artwork for {downloaded} movies"));
                     }
                 }
-                tmdb_state.log("TMDB metadata fetch complete");
+                tmdb_state.debug("TMDB metadata fetch complete");
                 if let Ok(updated) = library::Library::scan(&tmdb_path) {
                     *tmdb_state.library.write().await = updated;
                 }
@@ -371,14 +419,16 @@ pub async fn start_server(
 
                         if !series_needing_metadata.is_empty() {
                             let count = series_needing_metadata.len();
-                            rescan_state.log(&format!("Fetching TMDB metadata for {count} series..."));
+                            rescan_state.debug(&format!("Fetching TMDB metadata for {count} series..."));
                             let log_state = rescan_state.clone();
+                            let debug_state = rescan_state.clone();
                             let downloaded = tmdb::fetch_all_metadata(
                                 client,
                                 &rescan_state.db,
                                 &rescan_path,
                                 series_needing_metadata,
                                 move |msg| log_state.log(msg),
+                                move |msg| debug_state.debug(msg),
                             )
                             .await;
                             if downloaded > 0 {
@@ -387,14 +437,16 @@ pub async fn start_server(
                         }
                         if !movies_needing_metadata.is_empty() {
                             let count = movies_needing_metadata.len();
-                            rescan_state.log(&format!("Fetching TMDB metadata for {count} movies..."));
+                            rescan_state.debug(&format!("Fetching TMDB metadata for {count} movies..."));
                             let log_state = rescan_state.clone();
+                            let debug_state = rescan_state.clone();
                             let downloaded = tmdb::fetch_all_movies_metadata(
                                 client,
                                 &rescan_state.db,
                                 &rescan_path,
                                 movies_needing_metadata,
                                 move |msg| log_state.log(msg),
+                                move |msg| debug_state.debug(msg),
                             )
                             .await;
                             if downloaded > 0 {
@@ -403,7 +455,7 @@ pub async fn start_server(
                         }
 
                         if did_work {
-                            rescan_state.log("TMDB metadata fetch complete");
+                            rescan_state.debug("TMDB metadata fetch complete");
                             if let Ok(updated_lib) = library::Library::scan(&rescan_path) {
                                 *rescan_state.library.write().await = updated_lib;
                                 continue;
@@ -424,7 +476,7 @@ pub async fn start_server(
     tokio::spawn(async move {
         // Short grace period so startup log lines can land first, then begin work immediately.
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        remux_state.log("Background remux task started");
+        remux_state.debug("Background remux task started");
         const MAX_REMUX_ATTEMPTS: i64 = 3;
         loop {
             let files_to_remux: Vec<(PathBuf, PathBuf, String, String, String, String)> = {
@@ -494,7 +546,7 @@ pub async fn start_server(
                     ));
                 }
                 if skipped_abandoned > 0 {
-                    remux_state.log(&format!(
+                    remux_state.debug(&format!(
                         "Skipping {skipped_abandoned} abandoned file(s) from previous failed attempts — use Retry to try again"
                     ));
                 }
@@ -502,7 +554,7 @@ pub async fn start_server(
             };
 
             if files_to_remux.is_empty() {
-                remux_state.log("All files are Apple TV ready");
+                remux_state.debug("All files are Apple TV ready");
                 tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                 continue;
             }

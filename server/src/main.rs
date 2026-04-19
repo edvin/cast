@@ -39,6 +39,11 @@ struct Args {
     /// Log to file in the media directory instead of stdout
     #[arg(long)]
     log_file: bool,
+
+    /// Enable verbose/debug logging (per-cycle scan chatter, probe details,
+    /// per-item TMDB progress). Off by default.
+    #[arg(long, env = "CAST_LOG_DEBUG")]
+    debug_log: bool,
 }
 
 #[tokio::main]
@@ -85,6 +90,7 @@ async fn main() {
         name: args.name,
         tmdb_key: args.tmdb_key,
         encoder_override: args.encoder,
+        debug_logging: args.debug_log,
     };
 
     match cast_server::start_server(config, None).await {

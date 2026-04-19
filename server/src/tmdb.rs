@@ -635,6 +635,7 @@ pub async fn fetch_all_movies_metadata(
     _media_root: &Path,
     movies: Vec<MovieFetchEntry>,
     log: impl Fn(&str),
+    debug: impl Fn(&str),
 ) -> usize {
     let mut downloaded = 0;
     let total = movies.len();
@@ -652,12 +653,12 @@ pub async fn fetch_all_movies_metadata(
 
         let msg = format!("TMDB movie [{}/{}]: {}", i + 1, total, entry.title);
         tracing::info!("{msg}");
-        log(&msg);
+        debug(&msg);
 
         let search_result = if let Some(tmdb_id) = entry.tmdb_id_override {
             let m = format!("Using TMDB movie ID override {tmdb_id} for '{}'", entry.title);
             tracing::info!("{m}");
-            log(&m);
+            debug(&m);
             client.get_movie_detail(tmdb_id).await
         } else {
             client.search_movie(&entry.title, entry.year.as_deref()).await
@@ -776,8 +777,9 @@ pub async fn fetch_all_metadata(
     client: &TmdbClient,
     db: &crate::db::Database,
     _media_root: &Path,
-    series_list: Vec<(String, String, bool, bool, Option<u64>)>, // (series_id, folder_name, has_art, has_backdrop, tmdb_id_override)
+    series_list: Vec<(String, String, bool, bool, Option<u64>)>,
     log: impl Fn(&str),
+    debug: impl Fn(&str),
 ) -> usize {
     let mut downloaded = 0;
 
@@ -799,13 +801,13 @@ pub async fn fetch_all_metadata(
 
         let progress_msg = format!("TMDB [{}/{}]: {}", i + 1, total, title);
         tracing::info!("{progress_msg}");
-        log(&progress_msg);
+        debug(&progress_msg);
 
         // Resolve series info: use override ID, cleaned name search, or raw name fallback
         let search_result = if let Some(tmdb_id) = tmdb_id_override {
             let msg = format!("Using TMDB ID override {tmdb_id} for '{title}'");
             tracing::info!("{msg}");
-            log(&msg);
+            debug(&msg);
             client.get_series_detail(tmdb_id).await
         } else {
             let cleaned = clean_search_query(&title);

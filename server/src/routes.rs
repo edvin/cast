@@ -107,6 +107,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Log verbosity toggle
         .route("/api/log-level", get(get_log_level))
         .route("/api/log-level", post(set_log_level))
+        // Network info (Wake-on-LAN support)
+        .route("/api/network-info", get(get_network_info))
         // Movies
         .route("/api/movies", get(list_movies))
         .route("/api/movies/{movie_id}", get(get_movie))
@@ -187,6 +189,70 @@ struct LogLevelUpdate {
 async fn get_log_level(State(state): State<Arc<AppState>>) -> Json<LogLevelResponse> {
     Json(LogLevelResponse {
         debug: state.debug_logging.load(std::sync::atomic::Ordering::Relaxed),
+    })
+}
+
+#[derive(Serialize)]
+struct NetworkInterface {
+    name: String,
+    mac: String,
+    ipv4: Option<String>,
+}
+
+#[derive(Serialize)]
+struct NetworkInfo {
+    hostname: String,
+    /// First non-loopback MAC address found, suitable for Wake-on-LAN.
+    primary_mac: Option<String>,
+    interfaces: Vec<NetworkInterface>,
+}
+
+/// Return host identity details so a tvOS client can store them after a successful
+/// connect and send a Wake-on-LAN magic packet later when the server is asleep.
+async fn get_network_info() -> Json<NetworkInfo> {
+    let hostname = hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    // Map interface name -> MAC, then pair with the IPv4 from get_if_addrs.
+    let mut interfaces: Vec<NetworkInterface> = Vec::new();
+    if let Ok(addrs) = get_if_addrs::get_if_addrs() {
+        for iface in addrs {
+            // We only care about non-loopback IPv4 interfaces for WoL hints.
+            if iface.is_loopback() {
+                continue;
+            }
+            let ipv4 = match iface.addr {
+                get_if_addrs::IfAddr::V4(ref a) => Some(a.ip.to_string()),
+                _ => None,
+            };
+            // mac_address looks it up by interface name
+            let mac = mac_address::mac_address_by_name(&iface.name)
+                .ok()
+                .flatten()
+                .map(|m| m.to_string())
+                .unwrap_or_default();
+            if mac.is_empty() {
+                continue;
+            }
+            interfaces.push(NetworkInterface {
+                name: iface.name,
+                mac,
+                ipv4,
+            });
+        }
+    }
+
+    let primary_mac = interfaces
+        .iter()
+        .find(|i| i.ipv4.is_some())
+        .map(|i| i.mac.clone())
+        .or_else(|| interfaces.first().map(|i| i.mac.clone()));
+
+    Json(NetworkInfo {
+        hostname,
+        primary_mac,
+        interfaces,
     })
 }
 

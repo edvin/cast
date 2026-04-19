@@ -7,7 +7,13 @@ final class ServerConnection {
     var connectionLost = false
 
     private static let lastServerKey = "lastServerAddress"
+    private static let lastServerMacKey = "lastServerMac"
     private var healthCheckTask: Task<Void, Never>?
+
+    /// Last-known MAC address of the server, stored for Wake-on-LAN attempts.
+    var lastKnownMac: String? {
+        UserDefaults.standard.string(forKey: Self.lastServerMacKey)
+    }
 
     func connect(host: String, port: UInt16) {
         let hostPart = host.contains(":") ? "[\(host)]" : host
@@ -15,6 +21,23 @@ final class ServerConnection {
         connectionLost = false
         UserDefaults.standard.set("\(host)|\(port)", forKey: Self.lastServerKey)
         startHealthCheck()
+        // Refresh the stored MAC in the background — used for WoL the next time the
+        // server is unreachable.
+        Task { await fetchAndStoreMac() }
+    }
+
+    private func fetchAndStoreMac() async {
+        guard let base = baseURL,
+              let url = URL(string: "http://\(base.host ?? "")\(base.port.map { ":\($0)" } ?? "")/api/network-info")
+        else { return }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            struct Info: Decodable { let primary_mac: String? }
+            if let info = try? JSONDecoder().decode(Info.self, from: data),
+               let mac = info.primary_mac, !mac.isEmpty {
+                UserDefaults.standard.set(mac, forKey: Self.lastServerMacKey)
+            }
+        } catch {}
     }
 
     func connect(address: String) {

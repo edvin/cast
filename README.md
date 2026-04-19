@@ -176,6 +176,31 @@ Start-ScheduledTask -TaskName CastServer
 .\uninstall-windows.ps1
 ```
 
+### Wake-on-LAN
+
+The tvOS app stores the server's MAC address after a successful connect and
+shows a **Wake Server** button on the "Server Unreachable" screen. Tap it to
+broadcast a magic packet on the local subnet. For this to actually wake a
+sleeping Windows machine you need:
+
+1. **BIOS / UEFI** — enable "Wake on LAN" / "Power on by PCI-E" / "Resume by PME"
+   (wording varies by vendor).
+2. **Network adapter** in Windows Device Manager → *Properties* → *Power
+   Management*: enable **Allow this device to wake the computer** and
+   **Only allow a magic packet to wake the computer**. On the *Advanced* tab,
+   set **Wake on Magic Packet** = Enabled. If present, also enable
+   **Wake on pattern match**.
+3. **Windows power plan** — disable Fast Startup
+   (Control Panel → Power Options → *Choose what the power button does* →
+   uncheck *Turn on fast startup*). Fast Startup leaves the NIC in an
+   unpowered state where WoL doesn't work on most adapters.
+4. **Router/switch** — WoL is a local-network feature. The magic packet has
+   to reach the server's subnet; cross-subnet WoL is out of scope here.
+
+You can verify WoL works from another machine on the LAN with `wakeonlan`
+(macOS: `brew install wakeonlan`) or any Windows WoL utility, independent of
+the Cast app.
+
 ## API
 
 | Method | Endpoint | Description |

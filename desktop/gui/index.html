@@ -1264,6 +1264,20 @@
         // Close overlay on Escape
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') closeDetail();
+            // Backspace acts as "back" — but only when the user isn't typing in an
+            // input/textarea, otherwise we'd steal character deletion.
+            if (e.key === 'Backspace') {
+                const tag = (e.target && e.target.tagName) || '';
+                const typing = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable);
+                const overlayOpen = document.getElementById('detailOverlay').classList.contains('active')
+                    || document.getElementById('watchedOverlay').classList.contains('active');
+                if (!typing && overlayOpen) {
+                    e.preventDefault();
+                    closeDetail();
+                    // Also close the watched-episodes overlay if it happens to be the one showing.
+                    document.getElementById('watchedOverlay').classList.remove('active');
+                }
+            }
         });
 
         // Close overlay on background click

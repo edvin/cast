@@ -100,6 +100,20 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/remux/failures", get(get_remux_failures))
         .route("/api/remux/retry", post(retry_all_remux_failures))
         .route("/api/remux/retry/{episode_id}", post(retry_one_remux_failure))
+        // Movies
+        .route("/api/movies", get(list_movies))
+        .route("/api/movies/{movie_id}", get(get_movie))
+        .route("/api/movies/{movie_id}", delete(delete_movie))
+        .route("/api/movies/{movie_id}/stream", get(stream_movie))
+        .route("/api/movies/{movie_id}/thumbnail", get(get_movie_thumbnail))
+        .route("/api/movies/{movie_id}/art", get(get_movie_art))
+        .route("/api/movies/{movie_id}/backdrop", get(get_movie_backdrop))
+        .route("/api/movies/{movie_id}/progress", get(get_movie_progress))
+        .route("/api/movies/{movie_id}/progress", post(update_movie_progress))
+        .route("/api/movies/{movie_id}/progress", delete(delete_movie_progress))
+        .route("/api/movies/{movie_id}/prepare", post(prepare_movie))
+        .route("/api/movies/{movie_id}/subtitles", get(list_movie_subtitles))
+        .route("/api/movies/{movie_id}/subtitles/{language}", get(get_movie_subtitle))
         .layer(cors)
         .with_state(state)
 }
@@ -2106,6 +2120,539 @@ async fn delete_episode(
     }
 
     state.log(&format!("Deleted episode: {filename}"));
+    Ok(Json(serde_json::json!({ "deleted": filename })))
+}
+
+// ============================================================
+// Movie endpoints
+// ============================================================
+
+#[derive(Serialize)]
+struct MovieListItem {
+    id: String,
+    title: String,
+    year: Option<String>,
+    path: String,
+    size_bytes: u64,
+    has_art: bool,
+    has_backdrop: bool,
+    has_metadata: bool,
+    overview: Option<String>,
+    genres: Option<String>,
+    rating: Option<f64>,
+    runtime_minutes: Option<u32>,
+    tagline: Option<String>,
+    progress: Option<EpisodeProgress>,
+}
+
+async fn list_movies(State(state): State<Arc<AppState>>) -> Json<Vec<MovieListItem>> {
+    let lib = state.library.read().await;
+    let all_progress = state.db.get_all_progress_map();
+    let mut items: Vec<MovieListItem> = lib
+        .movies
+        .values()
+        .map(|m| {
+            let meta = state.db.get_movie_metadata(&m.id);
+            let prog = all_progress.get(&m.id).map(|p| EpisodeProgress {
+                position_secs: p.position_secs,
+                duration_secs: p.duration_secs,
+                completed: p.completed,
+            });
+            MovieListItem {
+                id: m.id.clone(),
+                title: meta
+                    .as_ref()
+                    .and_then(|x| x.title.clone())
+                    .unwrap_or_else(|| m.title.clone()),
+                year: meta
+                    .as_ref()
+                    .and_then(|x| x.release_date.as_ref())
+                    .and_then(|d| d.get(..4).map(|s| s.to_string()))
+                    .or_else(|| m.year.clone()),
+                path: m.path.clone(),
+                size_bytes: m.size_bytes,
+                has_art: m.art.is_some(),
+                has_backdrop: m.backdrop.is_some(),
+                has_metadata: meta.is_some(),
+                overview: meta.as_ref().and_then(|x| x.overview.clone()),
+                genres: meta.as_ref().and_then(|x| x.genres.clone()),
+                rating: meta.as_ref().and_then(|x| x.rating),
+                runtime_minutes: meta.as_ref().and_then(|x| x.runtime_minutes),
+                tagline: meta.as_ref().and_then(|x| x.tagline.clone()),
+                progress: prog,
+            }
+        })
+        .collect();
+    items.sort_by_key(|m| m.title.to_lowercase());
+    Json(items)
+}
+
+#[derive(Serialize)]
+struct MovieDetail {
+    id: String,
+    title: String,
+    year: Option<String>,
+    path: String,
+    size_bytes: u64,
+    has_art: bool,
+    has_backdrop: bool,
+    has_metadata: bool,
+    overview: Option<String>,
+    genres: Option<String>,
+    rating: Option<f64>,
+    runtime_minutes: Option<u32>,
+    tagline: Option<String>,
+    progress: Option<EpisodeProgress>,
+    has_external_subtitles: bool,
+}
+
+async fn get_movie(State(state): State<Arc<AppState>>, Path(movie_id): Path<String>) -> ApiResult<Json<MovieDetail>> {
+    let lib = state.library.read().await;
+    let m = lib
+        .find_movie(&movie_id)
+        .ok_or_else(|| ApiError::not_found("Movie not found"))?;
+    let meta = state.db.get_movie_metadata(&m.id);
+    let prog = state.db.get_progress(&m.id).map(|p| EpisodeProgress {
+        position_secs: p.position_secs,
+        duration_secs: p.duration_secs,
+        completed: p.completed,
+    });
+    Ok(Json(MovieDetail {
+        id: m.id.clone(),
+        title: meta
+            .as_ref()
+            .and_then(|x| x.title.clone())
+            .unwrap_or_else(|| m.title.clone()),
+        year: meta
+            .as_ref()
+            .and_then(|x| x.release_date.as_ref())
+            .and_then(|d| d.get(..4).map(|s| s.to_string()))
+            .or_else(|| m.year.clone()),
+        path: m.path.clone(),
+        size_bytes: m.size_bytes,
+        has_art: m.art.is_some(),
+        has_backdrop: m.backdrop.is_some(),
+        has_metadata: meta.is_some(),
+        overview: meta.as_ref().and_then(|x| x.overview.clone()),
+        genres: meta.as_ref().and_then(|x| x.genres.clone()),
+        rating: meta.as_ref().and_then(|x| x.rating),
+        runtime_minutes: meta.as_ref().and_then(|x| x.runtime_minutes),
+        tagline: meta.as_ref().and_then(|x| x.tagline.clone()),
+        progress: prog,
+        has_external_subtitles: !m.subtitles.is_empty(),
+    }))
+}
+
+async fn stream_movie(
+    State(state): State<Arc<AppState>>,
+    Path(movie_id): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let file_path = {
+        let lib = state.library.read().await;
+        let m = lib
+            .find_movie(&movie_id)
+            .ok_or_else(|| ApiError::not_found("Movie not found"))?;
+        safe_media_path(&state.media_path, &m.path)?
+    };
+
+    // If a pre-remuxed sibling .mp4 exists for a non-MP4 source, prefer it
+    if needs_remux(&file_path) {
+        let stem = file_path.file_stem().unwrap_or_default().to_string_lossy();
+        let parent = file_path.parent().unwrap();
+        let mp4_sibling = parent.join(format!("{stem}.mp4"));
+        if mp4_sibling.exists() {
+            let file_size = mp4_sibling
+                .metadata()
+                .map(|m| m.len())
+                .map_err(|_| ApiError::not_found("Video file not found"))?;
+            return serve_file(mp4_sibling, &headers, file_size, "video/mp4").await;
+        }
+    }
+
+    let file_size = file_path
+        .metadata()
+        .map(|m| m.len())
+        .map_err(|_| ApiError::not_found("Video file not found"))?;
+
+    if needs_remux(&file_path) {
+        let stem = file_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        if let Ok(mut streams) = state.active_streams.lock() {
+            streams.insert(stem.clone());
+        }
+        return stream_remuxed(file_path, headers, file_size, state.clone()).await;
+    }
+
+    let content_type = mime_guess::from_path(&file_path).first_or_octet_stream().to_string();
+    serve_file(file_path, &headers, file_size, &content_type).await
+}
+
+async fn get_movie_thumbnail(State(state): State<Arc<AppState>>, Path(movie_id): Path<String>) -> ApiResult<Response> {
+    // If the movie has art (poster), serve that instead of generating a frame thumb.
+    let art_rel = {
+        let lib = state.library.read().await;
+        let m = lib
+            .find_movie(&movie_id)
+            .ok_or_else(|| ApiError::not_found("Movie not found"))?;
+        m.art.clone()
+    };
+
+    if let Some(rel) = art_rel {
+        let path = safe_media_path(&state.media_path, &rel)?;
+        let ct = mime_guess::from_path(&path).first_or_octet_stream().to_string();
+        let data = tokio::fs::read(&path)
+            .await
+            .map_err(|_| ApiError::internal("Failed to read poster"))?;
+        return Ok(([(header::CONTENT_TYPE, ct)], data).into_response());
+    }
+
+    // Fall back to an ffmpeg-generated thumb of the movie at ~10% / 30s.
+    let thumb_dir = state.media_path.join(".thumbnails");
+    let thumb_path = thumb_dir.join(format!("{movie_id}.jpg"));
+    if !thumb_path.exists() {
+        let video_path = {
+            let lib = state.library.read().await;
+            let m = lib
+                .find_movie(&movie_id)
+                .ok_or_else(|| ApiError::not_found("Movie not found"))?;
+            safe_media_path(&state.media_path, &m.path)?
+        };
+        tokio::fs::create_dir_all(&thumb_dir)
+            .await
+            .map_err(|_| ApiError::internal("Failed to create thumbnail directory"))?;
+        let _permit = state
+            .thumb_semaphore
+            .acquire()
+            .await
+            .map_err(|_| ApiError::internal("Thumbnail semaphore closed"))?;
+        let duration = crate::media::probe_duration(&video_path).unwrap_or(300.0);
+        let timestamp = (duration * 0.1).min(30.0);
+        let vp = video_path.clone();
+        let tp = thumb_path.clone();
+        tokio::task::spawn_blocking(move || crate::media::generate_thumbnail(&vp, &tp, timestamp))
+            .await
+            .map_err(|_| ApiError::internal("Failed to generate thumbnail"))?
+            .map_err(|_| ApiError::internal("Failed to generate thumbnail"))?;
+    }
+    if !thumb_path.exists() {
+        return Err(ApiError::not_found("Thumbnail not available"));
+    }
+    let data = tokio::fs::read(&thumb_path)
+        .await
+        .map_err(|_| ApiError::internal("Failed to read file"))?;
+    Ok(([(header::CONTENT_TYPE, "image/jpeg".to_string())], data).into_response())
+}
+
+async fn get_movie_art(State(state): State<Arc<AppState>>, Path(movie_id): Path<String>) -> ApiResult<Response> {
+    let lib = state.library.read().await;
+    let m = lib
+        .find_movie(&movie_id)
+        .ok_or_else(|| ApiError::not_found("Movie not found"))?;
+    let rel = m
+        .art
+        .as_ref()
+        .ok_or_else(|| ApiError::not_found("No poster for this movie"))?;
+    let path = safe_media_path(&state.media_path, rel)?;
+    let ct = mime_guess::from_path(&path).first_or_octet_stream().to_string();
+    let data = tokio::fs::read(&path)
+        .await
+        .map_err(|_| ApiError::internal("Failed to read poster"))?;
+    Ok(([(header::CONTENT_TYPE, ct)], data).into_response())
+}
+
+async fn get_movie_backdrop(State(state): State<Arc<AppState>>, Path(movie_id): Path<String>) -> ApiResult<Response> {
+    let lib = state.library.read().await;
+    let m = lib
+        .find_movie(&movie_id)
+        .ok_or_else(|| ApiError::not_found("Movie not found"))?;
+    let rel = m
+        .backdrop
+        .as_ref()
+        .ok_or_else(|| ApiError::not_found("No backdrop for this movie"))?;
+    let path = safe_media_path(&state.media_path, rel)?;
+    let ct = mime_guess::from_path(&path).first_or_octet_stream().to_string();
+    let data = tokio::fs::read(&path)
+        .await
+        .map_err(|_| ApiError::internal("Failed to read backdrop"))?;
+    Ok(([(header::CONTENT_TYPE, ct)], data).into_response())
+}
+
+async fn get_movie_progress(
+    State(state): State<Arc<AppState>>,
+    Path(movie_id): Path<String>,
+) -> ApiResult<Json<Option<EpisodeProgress>>> {
+    // Confirm the movie exists
+    {
+        let lib = state.library.read().await;
+        lib.find_movie(&movie_id)
+            .ok_or_else(|| ApiError::not_found("Movie not found"))?;
+    }
+    let progress = state.db.get_progress(&movie_id).map(|p| EpisodeProgress {
+        position_secs: p.position_secs,
+        duration_secs: p.duration_secs,
+        completed: p.completed,
+    });
+    Ok(Json(progress))
+}
+
+async fn update_movie_progress(
+    State(state): State<Arc<AppState>>,
+    Path(movie_id): Path<String>,
+    Json(body): Json<ProgressUpdate>,
+) -> ApiResult<StatusCode> {
+    state
+        .db
+        .update_progress(&movie_id, body.position_secs, body.duration_secs)
+        .map_err(|_| ApiError::internal("Failed to update progress"))?;
+    Ok(StatusCode::OK)
+}
+
+async fn delete_movie_progress(
+    State(state): State<Arc<AppState>>,
+    Path(movie_id): Path<String>,
+) -> ApiResult<StatusCode> {
+    state
+        .db
+        .delete_progress(&movie_id)
+        .map_err(|_| ApiError::internal("Failed to clear progress"))?;
+    Ok(StatusCode::OK)
+}
+
+async fn prepare_movie(
+    State(state): State<Arc<AppState>>,
+    Path(movie_id): Path<String>,
+) -> ApiResult<Json<PrepareResponse>> {
+    let lib = state.library.read().await;
+    let m = lib
+        .find_movie(&movie_id)
+        .ok_or_else(|| ApiError::not_found("Movie not found"))?;
+    let file_path = safe_media_path(&state.media_path, &m.path)?;
+
+    if !needs_remux(&file_path) {
+        return Ok(Json(PrepareResponse {
+            ready: true,
+            needs_remux: false,
+            remuxing: false,
+            progress_percent: None,
+        }));
+    }
+
+    let stem = file_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+    let parent = file_path.parent().unwrap();
+    let mp4_path = parent.join(format!("{stem}.mp4"));
+    let tmp_path = parent.join(format!("{stem}.mp4.tmp"));
+
+    if mp4_path.exists() {
+        return Ok(Json(PrepareResponse {
+            ready: true,
+            needs_remux: true,
+            remuxing: false,
+            progress_percent: Some(100),
+        }));
+    }
+
+    let is_remuxing = state.remuxing.lock().map(|s| s.contains(&stem)).unwrap_or(false);
+    if !is_remuxing && tmp_path.exists() {
+        state.log(&format!(
+            "Found orphaned {} with no active remux — cleaning up",
+            tmp_path.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+
+    if is_remuxing {
+        let progress = if let (Ok(tmp_meta), Ok(src_meta)) = (tmp_path.metadata(), file_path.metadata()) {
+            let src_size = src_meta.len();
+            let tmp_size = tmp_meta.len();
+            if src_size > 0 {
+                Some((tmp_size as f64 / src_size as f64 * 100.0).min(99.0) as u32)
+            } else {
+                Some(0)
+            }
+        } else {
+            Some(0)
+        };
+        return Ok(Json(PrepareResponse {
+            ready: false,
+            needs_remux: true,
+            remuxing: true,
+            progress_percent: progress,
+        }));
+    }
+
+    // Not remuxing yet — kick it off now
+    let file_path_clone = file_path.to_path_buf();
+    let tmp_clone = tmp_path.clone();
+    let mp4_clone = mp4_path.clone();
+    let stem_clone = stem.clone();
+
+    if let Ok(mut set) = state.remuxing.lock() {
+        set.insert(stem.clone());
+    }
+    drop(lib);
+
+    let remuxing_ref = state.remuxing.clone();
+    let log_state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let (video_codec, video_extra) = detect_video_codec(&file_path_clone, log_state.transcode_encoder);
+        log_state.log(&format!(
+            "On-demand movie remux: {} (video: {video_codec})",
+            file_path_clone.file_name().unwrap().to_string_lossy()
+        ));
+        let mut cmd = crate::media::ffmpeg_command();
+        cmd.arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("warning")
+            .arg("-i")
+            .arg(&file_path_clone)
+            .arg("-c:v")
+            .arg(video_codec);
+        if video_codec != "copy" {
+            for part in video_extra.split_whitespace() {
+                cmd.arg(part);
+            }
+        }
+        let output = cmd
+            .arg("-c:a")
+            .arg("aac")
+            .arg("-b:a")
+            .arg("192k")
+            .arg("-ac")
+            .arg("2")
+            .arg("-map")
+            .arg("0:v:0")
+            .arg("-map")
+            .arg("0:a:0")
+            .arg("-map")
+            .arg("0:s?")
+            .arg("-c:s")
+            .arg("mov_text")
+            .arg("-movflags")
+            .arg("+faststart")
+            .arg("-f")
+            .arg("mp4")
+            .arg("-y")
+            .arg(&tmp_clone)
+            .output();
+        match output {
+            Ok(result) if result.status.success() => {
+                if std::fs::rename(&tmp_clone, &mp4_clone).is_ok() {
+                    log_state.log(&format!(
+                        "On-demand movie remux complete: {}",
+                        mp4_clone.file_name().unwrap().to_string_lossy()
+                    ));
+                    let _ = std::fs::remove_file(&file_path_clone);
+                }
+            }
+            Ok(result) => {
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                log_state.log(&format!(
+                    "On-demand movie remux failed: {}",
+                    stderr.lines().next().unwrap_or("unknown")
+                ));
+                let _ = std::fs::remove_file(&tmp_clone);
+            }
+            Err(e) => {
+                log_state.log(&format!("ffmpeg not available: {e}"));
+            }
+        }
+        if let Ok(mut set) = remuxing_ref.lock() {
+            set.remove(&stem_clone);
+        }
+    });
+
+    Ok(Json(PrepareResponse {
+        ready: false,
+        needs_remux: true,
+        remuxing: true,
+        progress_percent: Some(0),
+    }))
+}
+
+async fn list_movie_subtitles(
+    State(state): State<Arc<AppState>>,
+    Path(movie_id): Path<String>,
+) -> ApiResult<Json<Vec<SubtitleInfo>>> {
+    let lib = state.library.read().await;
+    let m = lib
+        .find_movie(&movie_id)
+        .ok_or_else(|| ApiError::not_found("Movie not found"))?;
+    let subs: Vec<SubtitleInfo> = m
+        .subtitles
+        .iter()
+        .map(|s| SubtitleInfo {
+            language: s.language.clone(),
+            label: language_label(&s.language),
+        })
+        .collect();
+    Ok(Json(subs))
+}
+
+async fn get_movie_subtitle(
+    State(state): State<Arc<AppState>>,
+    Path((movie_id, language)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let sub_rel = {
+        let lib = state.library.read().await;
+        let m = lib
+            .find_movie(&movie_id)
+            .ok_or_else(|| ApiError::not_found("Movie not found"))?;
+        m.subtitles
+            .iter()
+            .find(|s| s.language == language)
+            .map(|s| s.path.clone())
+            .ok_or_else(|| ApiError::not_found("Subtitle not found"))?
+    };
+    let path = safe_media_path(&state.media_path, &sub_rel)?;
+    let srt = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|_| ApiError::internal("Failed to read subtitle file"))?;
+    let vtt = crate::subtitle::srt_to_webvtt(&srt);
+    Ok(([(header::CONTENT_TYPE, "text/vtt".to_string())], vtt).into_response())
+}
+
+async fn delete_movie(
+    State(state): State<Arc<AppState>>,
+    Path(movie_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let file_path = {
+        let lib = state.library.read().await;
+        let m = lib
+            .find_movie(&movie_id)
+            .ok_or_else(|| ApiError::not_found("Movie not found"))?;
+        state.media_path.join(&m.path)
+    };
+    let filename = file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    // Delete the video + any related files sharing the same stem
+    if let (Some(parent), Some(stem)) = (file_path.parent(), file_path.file_stem()) {
+        let stem_str = stem.to_string_lossy();
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                if let Some(entry_stem) = entry_path.file_stem() {
+                    let entry_stem_str = entry_stem.to_string_lossy();
+                    if entry_stem_str == stem_str || entry_stem_str.starts_with(&format!("{stem_str}.")) {
+                        let _ = std::fs::remove_file(&entry_path);
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = state.db.delete_progress(&movie_id);
+    state.db.delete_movie_metadata(&movie_id);
+    state.db.retry_remux_failures(Some(&movie_id));
+
+    if let Ok(lib) = crate::library::Library::scan(&state.media_path) {
+        *state.library.write().await = lib;
+    }
+
+    state.log(&format!("Deleted movie: {filename}"));
     Ok(Json(serde_json::json!({ "deleted": filename })))
 }
 

@@ -351,6 +351,7 @@
         <div class="tab" data-page="logs">Logs <span class="tab-badge hidden" id="logBadge">0</span></div>
         <div class="tab" data-page="failures">Failures <span class="tab-badge hidden" id="failureBadge">0</span></div>
         <div class="tab" data-page="settings">Settings</div>
+        <div class="tab" data-page="help">Help</div>
     </div>
 
     <div class="content">
@@ -469,6 +470,116 @@
                 <p class="note">Settings are saved alongside the executable.</p>
             </div>
         </div>
+
+        <!-- Help page -->
+        <div class="page" id="page-help">
+            <div style="max-width:780px; margin:0 auto; font-size:14px; line-height:1.55; color:#ccc;">
+
+                <h2 style="margin-top:0; color:#fff;">Wake-on-LAN</h2>
+                <p>
+                    The Apple TV app stores this server's MAC address after it connects,
+                    and shows a <strong>Wake Server</strong> button on the "Server
+                    Unreachable" screen. Tap it to broadcast a magic packet on the local
+                    subnet. For the packet to actually wake a sleeping Windows machine,
+                    the server needs all four of the following set up:
+                </p>
+
+                <div id="wolNetworkInfo" style="background:#141414; border:1px solid #222; border-radius:8px; padding:12px 16px; margin:16px 0; font-size:13px;">
+                    <div style="color:#888; font-size:11px; text-transform:uppercase; letter-spacing:0.04em;">This server</div>
+                    <div id="wolNetworkDetails" style="margin-top:6px; color:#aaa;">Loading…</div>
+                </div>
+
+                <ol style="padding-left:20px;">
+                    <li style="margin-bottom:14px;">
+                        <strong>BIOS / UEFI</strong> — enable the option typically called
+                        <em>Wake on LAN</em>, <em>Power on by PCI-E</em> or
+                        <em>Resume by PME</em>. The exact wording varies by vendor.
+                        You'll need to reboot into setup to change it.
+                    </li>
+                    <li style="margin-bottom:14px;">
+                        <strong>Network adapter driver</strong> — open
+                        <em>Device Manager → Network adapters → (your NIC) → Properties</em>.
+                        <ul style="margin-top:6px;">
+                            <li>On the <em>Power Management</em> tab: enable <strong>Allow
+                            this device to wake the computer</strong> and <strong>Only
+                            allow a magic packet to wake the computer</strong>.</li>
+                            <li>On the <em>Advanced</em> tab: find
+                            <strong>Wake on Magic Packet</strong> and set it to
+                            <em>Enabled</em>. If there's a <em>Wake on pattern match</em>
+                            entry, enable that too.</li>
+                        </ul>
+                    </li>
+                    <li style="margin-bottom:14px;">
+                        <strong>Disable Windows Fast Startup</strong>. This is the single
+                        most common reason WoL fails on Windows — Fast Startup puts the
+                        NIC into an unpowered state where magic packets go nowhere.
+                        <ul style="margin-top:6px;">
+                            <li>Control Panel → <em>Power Options</em> →
+                            <em>Choose what the power button does</em> →
+                            <em>Change settings that are currently unavailable</em> →
+                            uncheck <strong>Turn on fast startup</strong> → save.</li>
+                        </ul>
+                    </li>
+                    <li style="margin-bottom:14px;">
+                        <strong>Same local network</strong>. The magic packet is a UDP
+                        broadcast; it reaches machines on the same subnet as the Apple TV.
+                        Cross-subnet WoL requires a router with a "WoL relay" /
+                        "forward directed broadcasts" option and is out of scope for this
+                        app's button.
+                    </li>
+                </ol>
+
+                <p style="color:#888; font-size:12px;">
+                    Tip: verify WoL works independently first. From another machine on
+                    the LAN, try
+                    <code style="background:#1a1a1a; padding:2px 6px; border-radius:4px;">wakeonlan &lt;mac&gt;</code>
+                    (Mac/Linux) or any Windows WoL utility while the server is asleep.
+                    If that works, the Apple TV button will too.
+                </p>
+
+                <h2 style="margin-top:40px; color:#fff;">Folder layout</h2>
+                <p>
+                    Every direct subdirectory of your media folder is treated as a TV
+                    series (its video files become episodes), <em>except</em> directories
+                    named <code>Movies</code>, <code>Films</code>, <code>Film</code>,
+                    <code>Filmer</code> or <code>Filmes</code> — those are movie containers.
+                    Inside a movie container every video file at any depth is treated as
+                    a single movie, regardless of organizational subfolders
+                    (e.g. <code>Films/Action/Kill Bill.mkv</code> works the same as a flat
+                    file). Place a <code>tmdb.txt</code> with a TMDB ID inside any
+                    series folder or movie folder to force a specific match.
+                </p>
+
+                <h2 style="margin-top:40px; color:#fff;">Transcoding</h2>
+                <p>
+                    MKV / AVI / WebM / FLV files are remuxed (or transcoded, if the codec
+                    isn't compatible) to MP4 in the background. The server picks the
+                    fastest available H.264 encoder automatically — NVIDIA NVENC, Intel
+                    QuickSync or AMD AMF on Windows, VideoToolbox on macOS — falling back
+                    to software (libx264) if no hardware encoder works. You can override
+                    the choice from the Settings tab, or via the
+                    <code>CAST_ENCODER</code> env var.
+                </p>
+
+                <h2 style="margin-top:40px; color:#fff;">Logs &amp; diagnostics</h2>
+                <p>
+                    The <em>Logs</em> tab shows per-session events only. Turn on
+                    <strong>Verbose logging</strong> in Settings to surface the
+                    per-cycle scan chatter, TMDB per-item progress and hardware
+                    probe details. The <em>Failures</em> tab lists any remux or TMDB
+                    lookup failures with Retry + Delete actions; failures whose
+                    underlying file has been removed get swept automatically on the
+                    next rescan cycle.
+                </p>
+
+                <h2 style="margin-top:40px; color:#fff;">About</h2>
+                <p style="color:#888;">
+                    Cast Server — local-network media streaming for Apple TV.
+                    See <a href="https://github.com/edvin/cast" target="_blank" style="color:#4a90e2;">github.com/edvin/cast</a>
+                    for source, issues and releases.
+                </p>
+            </div>
+        </div>
     </div>
 
     <!-- Status bar -->
@@ -542,8 +653,30 @@
                 // so anything emitted before `listen` attached isn't lost.
                 if (tab.dataset.page === 'logs') loadLogs();
                 if (tab.dataset.page === 'failures') loadFailures();
+                if (tab.dataset.page === 'help') loadNetworkInfo();
             });
         });
+
+        async function loadNetworkInfo() {
+            const el = document.getElementById('wolNetworkDetails');
+            try {
+                const resp = await fetch(apiUrl('/api/network-info'));
+                if (!resp.ok) throw new Error(`status ${resp.status}`);
+                const info = await resp.json();
+                const rows = [];
+                if (info.hostname) rows.push(`<div><span style="color:#888;">Hostname:</span> <code style="background:#1a1a1a;padding:2px 6px;border-radius:4px;">${esc(info.hostname)}</code></div>`);
+                if (info.primary_mac) rows.push(`<div style="margin-top:4px;"><span style="color:#888;">Primary MAC (used for WoL):</span> <code style="background:#1a1a1a;padding:2px 6px;border-radius:4px;color:#34c759;">${esc(info.primary_mac)}</code></div>`);
+                if (info.interfaces && info.interfaces.length > 0) {
+                    rows.push(`<div style="margin-top:8px;color:#888;font-size:11px;">All interfaces:</div>`);
+                    for (const iface of info.interfaces) {
+                        rows.push(`<div style="font-size:12px;color:#aaa;">${esc(iface.name)} — <code style="background:#1a1a1a;padding:1px 5px;border-radius:3px;">${esc(iface.mac)}</code>${iface.ipv4 ? ` @ <code style="background:#1a1a1a;padding:1px 5px;border-radius:3px;">${esc(iface.ipv4)}</code>` : ''}</div>`);
+                    }
+                }
+                el.innerHTML = rows.join('') || '<span style="color:#888;">No network interfaces reported.</span>';
+            } catch (e) {
+                el.innerHTML = '<span style="color:#888;">Server not running — start it to see this machine\'s MAC.</span>';
+            }
+        }
 
         // --- Remux failures ---
         async function loadFailures() {

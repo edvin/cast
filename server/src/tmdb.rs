@@ -516,8 +516,16 @@ impl TmdbClient {
         // for roles in the same year. Entries missing a year sink to the bottom. Ratings may be
         // NaN from malformed TMDB payloads, so normalise to a total-orderable f64 via total_cmp.
         known_for.sort_by(|a, b| {
-            let ay = a.year.as_deref().and_then(|y| y.parse::<i32>().ok()).unwrap_or(i32::MIN);
-            let by = b.year.as_deref().and_then(|y| y.parse::<i32>().ok()).unwrap_or(i32::MIN);
+            let ay = a
+                .year
+                .as_deref()
+                .and_then(|y| y.parse::<i32>().ok())
+                .unwrap_or(i32::MIN);
+            let by = b
+                .year
+                .as_deref()
+                .and_then(|y| y.parse::<i32>().ok())
+                .unwrap_or(i32::MIN);
             by.cmp(&ay).then_with(|| {
                 let ar = a.rating.filter(|r| r.is_finite()).unwrap_or(f64::NEG_INFINITY);
                 let br = b.rating.filter(|r| r.is_finite()).unwrap_or(f64::NEG_INFINITY);

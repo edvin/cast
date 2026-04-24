@@ -112,20 +112,34 @@ pub fn probe_duration(path: &Path) -> Option<f64> {
 /// The `timestamp_secs` parameter controls which frame to extract. A good
 /// default is 10% into the video or 30 seconds, whichever is less — the caller
 /// can compute that via [`probe_duration`].
+///
+/// On failure, the returned error carries the tail of ffmpeg's stderr so the
+/// caller can log *why* it failed — useful for memoizing bad files.
 pub fn generate_thumbnail(video_path: &Path, output_path: &Path, timestamp_secs: f64) -> Result<(), std::io::Error> {
-    let status = ffmpeg_command()
+    let output = ffmpeg_command()
+        .args(["-hide_banner", "-loglevel", "error"])
         .args(["-ss", &format!("{timestamp_secs:.2}")])
         .arg("-i")
         .arg(video_path)
         .args(["-vframes", "1", "-q:v", "2", "-y"])
         .arg(output_path)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()?;
+        .output()?;
 
-    if status.success() {
-        Ok(())
-    } else {
-        Err(std::io::Error::other(format!("ffmpeg exited with status {status}")))
+    if output.status.success() && output_path.exists() {
+        return Ok(());
     }
+
+    // Pull the last non-empty line of stderr as the reason — ffmpeg is chatty,
+    // but the actionable bit is usually right at the end.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let reason = stderr
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("ffmpeg failed");
+    Err(std::io::Error::other(format!(
+        "ffmpeg exited with {}: {reason}",
+        output.status
+    )))
 }

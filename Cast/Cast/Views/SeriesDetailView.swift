@@ -361,7 +361,12 @@ private struct EpisodeRow: View {
 
     var body: some View {
         HStack(spacing: 16) {
-            // Thumbnail — prefer TMDB still, then server thumbnail, then placeholder
+            // Thumbnail — prefer TMDB still, otherwise ask the server for a frame
+            // (generated via ffmpeg on demand). `hasThumbnail` is *not* a gate:
+            // the server lazily generates on first request, so gating on the cached
+            // flag would prevent the first generation from ever happening for
+            // episodes lacking a TMDB still. We always ask and let `AsyncImage`
+            // show the placeholder while it waits (or if it 502s).
             ZStack(alignment: .bottom) {
                 if let stillUrl = episode.stillUrl, let url = URL(string: stillUrl) {
                     AsyncImage(url: url) { image in
@@ -372,11 +377,14 @@ private struct EpisodeRow: View {
                     .frame(width: 200, height: 112)
                     .clipped()
                     .cornerRadius(8)
-                } else if episode.hasThumbnail, let client {
-                    AsyncImage(url: client.thumbnailURL(episodeId: episode.id)) { image in
-                        image.resizable().aspectRatio(16/9, contentMode: .fill)
-                    } placeholder: {
-                        thumbnailPlaceholder
+                } else if let client {
+                    AsyncImage(url: client.thumbnailURL(episodeId: episode.id)) { phase in
+                        switch phase {
+                        case .success(let image):
+                            image.resizable().aspectRatio(16/9, contentMode: .fill)
+                        default:
+                            thumbnailPlaceholder
+                        }
                     }
                     .frame(width: 200, height: 112)
                     .clipped()

@@ -26,6 +26,11 @@ pub struct AppState {
     /// Episode IDs currently having their thumbnail generated — prevents duplicate
     /// ffmpeg invocations when the UI asks for the same thumbnail concurrently.
     pub generating_thumbs: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// IDs whose thumbnail generation has failed this process lifetime, mapped to
+    /// the ffmpeg reason. Prevents re-running ffmpeg on every page load for a file
+    /// that can't produce a thumbnail (corrupt, bad codec, zero-length, etc.).
+    /// Cleared on process restart so users can retry by restarting the server.
+    pub thumb_failures: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
     /// Caps concurrent thumbnail ffmpegs so loading a 20-episode series page doesn't
     /// spawn 20 ffmpegs at once.
     pub thumb_semaphore: Arc<tokio::sync::Semaphore>,
@@ -266,6 +271,7 @@ pub async fn start_server(
         active_streams: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         remuxing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         generating_thumbs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        thumb_failures: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
         transcode_encoder,
         encoder_label,

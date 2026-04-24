@@ -1379,6 +1379,9 @@ async fn get_series_backdrop(State(state): State<Arc<AppState>>, Path(series_id)
 ///   of spawning a duplicate ffmpeg (TV app loads a whole season of thumbs at once).
 /// - Caps concurrent thumbnail ffmpegs via `thumb_semaphore` so we don't spawn one
 ///   ffmpeg per episode when a series page opens.
+/// - Memoizes generation failures for the lifetime of the process, so a file that
+///   ffmpeg can't turn into a thumbnail doesn't cost a fresh ffmpeg run on every
+///   page load.
 async fn get_episode_thumbnail(
     State(state): State<Arc<AppState>>,
     Path(episode_id): Path<String>,
@@ -1387,82 +1390,15 @@ async fn get_episode_thumbnail(
     let thumb_path = thumb_dir.join(format!("{episode_id}.jpg"));
 
     if !thumb_path.exists() {
-        // Try to claim the in-flight slot for this episode. If someone else owns it,
-        // wait for the thumbnail to appear on disk rather than re-running ffmpeg.
-        let claimed = {
-            let mut set = state
-                .generating_thumbs
-                .lock()
-                .map_err(|_| ApiError::internal("lock poisoned"))?;
-            if set.contains(&episode_id) {
-                false
-            } else {
-                set.insert(episode_id.clone());
-                true
-            }
-        };
-
-        if !claimed {
-            // Another task is generating — poll for the file with a short timeout.
-            for _ in 0..60 {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                if thumb_path.exists() {
-                    break;
-                }
-            }
-            if !thumb_path.exists() {
-                return Err(ApiError::internal("Thumbnail generation timed out"));
-            }
-        } else {
-            // We own the slot — ensure we release it even on error.
-            struct Guard<'a> {
-                set: &'a Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-                id: &'a str,
-            }
-            impl Drop for Guard<'_> {
-                fn drop(&mut self) {
-                    if let Ok(mut s) = self.set.lock() {
-                        s.remove(self.id);
-                    }
-                }
-            }
-            let _guard = Guard {
-                set: &state.generating_thumbs,
-                id: &episode_id,
-            };
-
-            let lib = state.library.read().await;
-            let (_series, episode) = lib
-                .find_episode(&episode_id)
-                .ok_or_else(|| ApiError::not_found("Episode not found"))?;
-            let video_path = safe_media_path(&state.media_path, &episode.path)?;
-            drop(lib);
-
-            tokio::fs::create_dir_all(&thumb_dir)
-                .await
-                .map_err(|_| ApiError::internal("Failed to create thumbnail directory"))?;
-
-            // Global concurrency cap across all in-flight thumbnail generators
-            let _permit = state
-                .thumb_semaphore
-                .acquire()
-                .await
-                .map_err(|_| ApiError::internal("Thumbnail semaphore closed"))?;
-
-            let duration = crate::media::probe_duration(&video_path).unwrap_or(300.0);
-            let timestamp = (duration * 0.1).min(30.0);
-
-            let vp = video_path.clone();
-            let tp = thumb_path.clone();
-            tokio::task::spawn_blocking(move || crate::media::generate_thumbnail(&vp, &tp, timestamp))
-                .await
-                .map_err(|_| ApiError::internal("Failed to generate thumbnail"))?
-                .map_err(|_| ApiError::internal("Failed to generate thumbnail"))?;
+        if let Some(reason) = previous_thumb_failure(&state, &episode_id)? {
+            return Err(thumb_failure_response(&reason));
         }
+
+        generate_episode_thumbnail(&state, &episode_id, &thumb_dir, &thumb_path).await?;
     }
 
     if !thumb_path.exists() {
-        return Err(ApiError::not_found("Episode not found"));
+        return Err(thumb_failure_response("thumbnail missing after generation"));
     }
 
     let data = tokio::fs::read(&thumb_path)
@@ -1470,6 +1406,135 @@ async fn get_episode_thumbnail(
         .map_err(|_| ApiError::internal("Failed to read file"))?;
 
     Ok(([(header::CONTENT_TYPE, "image/jpeg".to_string())], data).into_response())
+}
+
+/// Return `Some(reason)` if a previous ffmpeg attempt for this id failed in this
+/// process lifetime. Lets the handler short-circuit without re-running ffmpeg.
+fn previous_thumb_failure(state: &Arc<AppState>, id: &str) -> ApiResult<Option<String>> {
+    let map = state
+        .thumb_failures
+        .lock()
+        .map_err(|_| ApiError::internal("lock poisoned"))?;
+    Ok(map.get(id).cloned())
+}
+
+fn record_thumb_failure(state: &Arc<AppState>, id: &str, reason: &str) {
+    if let Ok(mut map) = state.thumb_failures.lock() {
+        map.insert(id.to_string(), reason.to_string());
+    }
+}
+
+fn clear_thumb_failure(state: &Arc<AppState>, id: &str) {
+    if let Ok(mut map) = state.thumb_failures.lock() {
+        map.remove(id);
+    }
+}
+
+/// Standardized response when thumbnail generation is known to have failed or
+/// times out. Uses 502 because the upstream (ffmpeg) failed to produce media —
+/// not a 404 (the episode exists) and not a plain 500 (it's deterministic).
+fn thumb_failure_response(reason: &str) -> (StatusCode, Json<ApiError>) {
+    tracing::debug!("Thumbnail unavailable: {reason}");
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(ApiError {
+            error: "Thumbnail unavailable".to_string(),
+            code: 502,
+            detail: Some(reason.to_string()),
+        }),
+    )
+}
+
+async fn generate_episode_thumbnail(
+    state: &Arc<AppState>,
+    episode_id: &str,
+    thumb_dir: &std::path::Path,
+    thumb_path: &std::path::Path,
+) -> ApiResult<()> {
+    // Claim the in-flight slot for this id. If someone else owns it, wait for the
+    // file to appear rather than spawning a duplicate ffmpeg.
+    let claimed = {
+        let mut set = state
+            .generating_thumbs
+            .lock()
+            .map_err(|_| ApiError::internal("lock poisoned"))?;
+        if set.contains(episode_id) {
+            false
+        } else {
+            set.insert(episode_id.to_string());
+            true
+        }
+    };
+
+    if !claimed {
+        for _ in 0..120 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if thumb_path.exists() {
+                return Ok(());
+            }
+            if let Some(reason) = previous_thumb_failure(state, episode_id)? {
+                return Err(thumb_failure_response(&reason));
+            }
+        }
+        return Err(thumb_failure_response("generation timed out waiting for peer"));
+    }
+
+    // We own the slot — ensure we release it even on error.
+    struct Guard<'a> {
+        set: &'a Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+        id: &'a str,
+    }
+    impl Drop for Guard<'_> {
+        fn drop(&mut self) {
+            if let Ok(mut s) = self.set.lock() {
+                s.remove(self.id);
+            }
+        }
+    }
+    let _guard = Guard {
+        set: &state.generating_thumbs,
+        id: episode_id,
+    };
+
+    let video_path = {
+        let lib = state.library.read().await;
+        let (_series, episode) = lib
+            .find_episode(episode_id)
+            .ok_or_else(|| ApiError::not_found("Episode not found"))?;
+        safe_media_path(&state.media_path, &episode.path)?
+    };
+
+    tokio::fs::create_dir_all(thumb_dir)
+        .await
+        .map_err(|_| ApiError::internal("Failed to create thumbnail directory"))?;
+
+    let _permit = state
+        .thumb_semaphore
+        .acquire()
+        .await
+        .map_err(|_| ApiError::internal("Thumbnail semaphore closed"))?;
+
+    let duration = crate::media::probe_duration(&video_path).unwrap_or(300.0);
+    let timestamp = (duration * 0.1).min(30.0);
+
+    let vp = video_path;
+    let tp = thumb_path.to_path_buf();
+    let result = tokio::task::spawn_blocking(move || crate::media::generate_thumbnail(&vp, &tp, timestamp))
+        .await
+        .map_err(|_| ApiError::internal("thumbnail task panicked"))?;
+
+    match result {
+        Ok(()) => {
+            clear_thumb_failure(state, episode_id);
+            Ok(())
+        }
+        Err(e) => {
+            let reason = e.to_string();
+            state.log(&format!("Thumbnail generation failed for {episode_id}: {reason}"));
+            record_thumb_failure(state, episode_id, &reason);
+            Err(thumb_failure_response(&reason))
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -2449,6 +2514,10 @@ async fn get_movie_thumbnail(State(state): State<Arc<AppState>>, Path(movie_id):
     let thumb_dir = state.media_path.join(".thumbnails");
     let thumb_path = thumb_dir.join(format!("{movie_id}.jpg"));
     if !thumb_path.exists() {
+        if let Some(reason) = previous_thumb_failure(&state, &movie_id)? {
+            return Err(thumb_failure_response(&reason));
+        }
+
         let video_path = {
             let lib = state.library.read().await;
             let m = lib
@@ -2468,13 +2537,21 @@ async fn get_movie_thumbnail(State(state): State<Arc<AppState>>, Path(movie_id):
         let timestamp = (duration * 0.1).min(30.0);
         let vp = video_path.clone();
         let tp = thumb_path.clone();
-        tokio::task::spawn_blocking(move || crate::media::generate_thumbnail(&vp, &tp, timestamp))
+        let result = tokio::task::spawn_blocking(move || crate::media::generate_thumbnail(&vp, &tp, timestamp))
             .await
-            .map_err(|_| ApiError::internal("Failed to generate thumbnail"))?
-            .map_err(|_| ApiError::internal("Failed to generate thumbnail"))?;
+            .map_err(|_| ApiError::internal("thumbnail task panicked"))?;
+        match result {
+            Ok(()) => clear_thumb_failure(&state, &movie_id),
+            Err(e) => {
+                let reason = e.to_string();
+                state.log(&format!("Thumbnail generation failed for movie {movie_id}: {reason}"));
+                record_thumb_failure(&state, &movie_id, &reason);
+                return Err(thumb_failure_response(&reason));
+            }
+        }
     }
     if !thumb_path.exists() {
-        return Err(ApiError::not_found("Thumbnail not available"));
+        return Err(thumb_failure_response("thumbnail missing after generation"));
     }
     let data = tokio::fs::read(&thumb_path)
         .await
@@ -2858,6 +2935,7 @@ mod tests {
             active_streams: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             generating_thumbs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            thumb_failures: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
             transcode_encoder: ("libx264", "-pix_fmt yuv420p -crf 18 -preset fast"),
             encoder_label: "software (libx264)".to_string(),
@@ -3167,6 +3245,7 @@ mod tests {
             active_streams: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             generating_thumbs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            thumb_failures: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
             transcode_encoder: ("libx264", "-pix_fmt yuv420p -crf 18 -preset fast"),
             encoder_label: "software (libx264)".to_string(),
@@ -3237,6 +3316,7 @@ mod tests {
             active_streams: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             generating_thumbs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            thumb_failures: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
             transcode_encoder: ("libx264", "-pix_fmt yuv420p -crf 18 -preset fast"),
             encoder_label: "software (libx264)".to_string(),
@@ -3461,6 +3541,7 @@ mod tests {
             active_streams: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             remuxing: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             generating_thumbs: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            thumb_failures: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             thumb_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
             transcode_encoder: ("libx264", "-pix_fmt yuv420p -crf 18 -preset fast"),
             encoder_label: "software (libx264)".to_string(),

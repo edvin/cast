@@ -113,14 +113,24 @@ pub fn probe_duration(path: &Path) -> Option<f64> {
 /// default is 10% into the video or 30 seconds, whichever is less — the caller
 /// can compute that via [`probe_duration`].
 ///
+/// Runs a short `cropdetect` pass over the same window first so baked-in
+/// cinematic letterbox bars (common on 2.35:1 / 2.39:1 content delivered in a
+/// 16:9 container) don't survive into the thumbnail.
+///
 /// On failure, the returned error carries the tail of ffmpeg's stderr so the
 /// caller can log *why* it failed — useful for memoizing bad files.
 pub fn generate_thumbnail(video_path: &Path, output_path: &Path, timestamp_secs: f64) -> Result<(), std::io::Error> {
-    let output = ffmpeg_command()
-        .args(["-hide_banner", "-loglevel", "error"])
+    let crop = detect_crop(video_path, timestamp_secs);
+
+    let mut cmd = ffmpeg_command();
+    cmd.args(["-hide_banner", "-loglevel", "error"])
         .args(["-ss", &format!("{timestamp_secs:.2}")])
         .arg("-i")
-        .arg(video_path)
+        .arg(video_path);
+    if let Some(ref filter) = crop {
+        cmd.args(["-vf", filter]);
+    }
+    let output = cmd
         .args(["-vframes", "1", "-q:v", "2", "-y"])
         .arg(output_path)
         .stdout(std::process::Stdio::null())
@@ -142,4 +152,73 @@ pub fn generate_thumbnail(video_path: &Path, output_path: &Path, timestamp_secs:
         "ffmpeg exited with {}: {reason}",
         output.status
     )))
+}
+
+/// Analyse ~2 seconds of video starting at `timestamp_secs` to detect any
+/// baked-in letterbox bars. Returns a `crop=W:H:X:Y` filter string when
+/// cropdetect reports a crop that's meaningfully tighter than the source
+/// frame, otherwise `None`.
+///
+/// The pass is cheap — 2 seconds of decode with no encode, `-loglevel info`
+/// just to keep `[Parsed_cropdetect_*]` lines on stderr. We deliberately
+/// don't fail the whole thumbnail if this probe returns garbage: a dark
+/// scene, a solid-color intro, or ffmpeg flakiness all silently skip the
+/// crop and we fall back to extracting the native frame.
+fn detect_crop(video_path: &Path, timestamp_secs: f64) -> Option<String> {
+    let output = ffmpeg_command()
+        .args(["-hide_banner", "-loglevel", "info"])
+        .args(["-ss", &format!("{timestamp_secs:.2}")])
+        .args(["-t", "2"])
+        .arg("-i")
+        .arg(video_path)
+        .args(["-vf", "cropdetect=limit=24:round=2:reset_count=0"])
+        .args(["-an", "-sn", "-f", "null", "-"])
+        .stdout(std::process::Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    // cropdetect emits lines like:
+    //   [Parsed_cropdetect_0 @ 0x...] x1:0 x2:1919 y1:138 y2:941 w:1920 h:804 x:0 y:138 ... crop=1920:804:0:138
+    // We want the *last* such crop value — cropdetect converges as it sees
+    // more frames, and bright mid-scene frames give a tighter answer than
+    // the dark lead-ins the probe may start on.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let crop_expr = stderr
+        .lines()
+        .rev()
+        .find_map(|line| {
+            line.split("crop=")
+                .nth(1)
+                .map(|s| s.split_whitespace().next().unwrap_or(""))
+        })
+        .filter(|s| !s.is_empty())?;
+
+    // Parse `W:H:X:Y`. Only apply the crop if it actually trims something —
+    // otherwise we'd just slow thumbnail gen down without changing the output.
+    let parts: Vec<&str> = crop_expr.split(':').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    let w: i32 = parts[0].parse().ok()?;
+    let h: i32 = parts[1].parse().ok()?;
+    let x: i32 = parts[2].parse().ok()?;
+    let y: i32 = parts[3].parse().ok()?;
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    // Guard against degenerate detections on solid-black scenes — if cropdetect
+    // thinks the content is a tiny sliver, fall back to the full frame.
+    if h < 100 || w < 100 {
+        return None;
+    }
+    if x == 0 && y == 0 {
+        // Full frame — no bars to trim.
+        return None;
+    }
+
+    Some(format!("crop={w}:{h}:{x}:{y}"))
 }

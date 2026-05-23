@@ -112,6 +112,9 @@ struct PlayerView: UIViewControllerRepresentable {
         private var progressReporter: ProgressReporter?
         private var playerRef: AVPlayer?
         weak var controller: AVPlayerViewController?
+        private var legibleGroup: AVMediaSelectionGroup?
+        private var timeControlObservation: NSKeyValueObservation?
+        private var wasPaused = true
 
         init(_ parent: PlayerView) {
             self.parent = parent
@@ -121,17 +124,31 @@ struct PlayerView: UIViewControllerRepresentable {
         func startPlayback(player: AVPlayer) {
             self.playerRef = player
 
-            if parent.resumePosition > 0 {
-                let time = CMTime(seconds: parent.resumePosition, preferredTimescale: 600)
-                player.seek(to: time) { [weak player] _ in
-                    player?.play()
+            // Re-assert the subtitle selection whenever playback resumes from a pause
+            // (or first starts). AVPlayer only paints a caption when playback crosses
+            // its start time, so a line that was already in progress when you paused or
+            // seeked never repaints on its own — you miss it and only catch the next
+            // line. Toggling the selection forces a repaint of the line covering the
+            // current moment.
+            timeControlObservation = player.observe(\.timeControlStatus) { [weak self] player, _ in
+                let status = player.timeControlStatus
+                Task { @MainActor in
+                    guard let self else { return }
+                    switch status {
+                    case .playing:
+                        if self.wasPaused { self.reassertSubtitleSelection() }
+                        self.wasPaused = false
+                    case .paused:
+                        self.wasPaused = true
+                    default:
+                        break  // .waitingToPlayAtSpecifiedRate (buffering) — leave as-is
+                    }
                 }
-            } else {
-                player.play()
             }
 
-            // Auto-select English subtitles
-            loadSubtitles(player: player)
+            // Select English subtitles BEFORE playback begins, then seek/play, so the
+            // opening dialogue is captioned instead of racing the async track selection.
+            startWithSubtitles(player: player)
 
             // Start progress reporting
             let reporter = ProgressReporter()
@@ -169,23 +186,41 @@ struct PlayerView: UIViewControllerRepresentable {
             }
         }
 
-        private func loadSubtitles(player: AVPlayer) {
+        /// Loads the legible (subtitle) group, auto-selects English, then seeks (when
+        /// resuming) and starts playback — so the track is active before the first
+        /// frame instead of being switched on a beat after playback already began.
+        private func startWithSubtitles(player: AVPlayer) {
             guard let item = player.currentItem else { return }
 
-            Task {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
                 if let group = try? await item.asset.loadMediaSelectionGroup(for: .legible) {
-                    // Auto-select English subtitles if available
+                    self.legibleGroup = group
                     let english = AVMediaSelectionGroup.mediaSelectionOptions(
                         from: group.options,
                         with: Locale(identifier: "en")
                     ).first
                     if let track = english {
-                        await MainActor.run {
-                            item.select(track, in: group)
-                        }
+                        item.select(track, in: group)
                     }
                 }
+
+                if self.parent.resumePosition > 0 {
+                    let time = CMTime(seconds: self.parent.resumePosition, preferredTimescale: 600)
+                    _ = await player.seek(to: time)
+                }
+                player.play()
             }
+        }
+
+        /// Forces AVPlayer to repaint the caption covering the current playhead by
+        /// briefly clearing and re-selecting the active legible option.
+        @MainActor
+        private func reassertSubtitleSelection() {
+            guard let item = playerRef?.currentItem, let group = legibleGroup else { return }
+            guard let current = item.currentMediaSelection.selectedMediaOption(in: group) else { return }
+            item.select(nil, in: group)
+            item.select(current, in: group)
         }
 
         @objc private func menuPressed() {
@@ -232,6 +267,7 @@ struct PlayerView: UIViewControllerRepresentable {
         }
 
         deinit {
+            timeControlObservation?.invalidate()
             NotificationCenter.default.removeObserver(self)
         }
     }
